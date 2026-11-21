@@ -50,6 +50,31 @@ export default function PDV() {
   }
 
 
+  const [consultaProdutosAberta,setConsultaProdutosAberta]=useState(false);
+  const [consultaProdutosBusca,setConsultaProdutosBusca]=useState("");
+  const [consultaProdutosLista,setConsultaProdutosLista]=useState<Produto[]>([]);
+  const [consultaProdutosCarregando,setConsultaProdutosCarregando]=useState(false);
+  const [consultaProdutosErro,setConsultaProdutosErro]=useState("");
+  async function abrirConsultaProdutos(){
+    setConsultaProdutosAberta(true);
+    setConsultaProdutosBusca("");
+    setConsultaProdutosErro("");
+    if(!supabase||!empresaId){setConsultaProdutosErro("Empresa ainda não identificada.");return;}
+    setConsultaProdutosCarregando(true);
+    try{
+      const {data,error}=await supabase.from("produtos")
+        .select("id,codigo,descricao,codigo_barras,preco_venda,estoque_atual,ativo")
+        .eq("empresa_id",empresaId).eq("ativo",true).order("descricao").limit(1000);
+      if(error)throw new Error(error.message);
+      setConsultaProdutosLista((data||[]) as Produto[]);
+    }catch(e){setConsultaProdutosErro(e instanceof Error?e.message:"Não foi possível consultar os produtos.");}
+    finally{setConsultaProdutosCarregando(false);}
+  }
+  const consultaProdutosFiltrados=consultaProdutosLista.filter(p=>{
+    const termo=consultaProdutosBusca.trim().toLocaleLowerCase("pt-BR");
+    return !termo||p.descricao.toLocaleLowerCase("pt-BR").includes(termo)||
+      String(p.codigo).includes(termo)||(p.codigo_barras||"").includes(termo);
+  }).slice(0,100);
   const [clienteBusca, setClienteBusca] = useState("");
   const [modo, setModo] = useState("1 - VENDA");
   const [hora, setHora] = useState("");
@@ -1172,13 +1197,19 @@ export default function PDV() {
 
     <header className="ev-novo-topo">
       <div className="ev-novo-marca"><div className="ev-novo-simbolo">E</div><div><strong>EVOLU<span>X</span></strong><small>GESTÃO EMPRESARIAL • PDV</small></div></div>
-      <div className="ev-novo-turno"><span className="ev-novo-status"><i/> {turno ? "Caixa aberto" : "Caixa não iniciado"}</span><span>Terminal 01 • {turno ? `Turno ${String(turno.numero).padStart(2,"0")}` : "Sem turno"} • {operador}</span><strong>{hora || "--:--:--"}</strong></div>
+      <div className="ev-novo-turno"><button type="button" onClick={()=>{sessionStorage.removeItem('evolux_funcionario_validado');sessionStorage.removeItem('evolux_empresa_selecionada');window.location.assign('/selecionar-usuario')}} style={{background:"#fff",color:"#102c58",border:"1px solid #cbd9e9",borderRadius:9,padding:"9px 12px",fontWeight:700,cursor:"pointer"}}>Trocar usuário</button><span className="ev-novo-status"><i/> {turno ? "Caixa aberto" : "Caixa não iniciado"}</span><span>Terminal 01 • {turno ? `Turno ${String(turno.numero).padStart(2,"0")}` : "Sem turno"} • {operador}</span><strong>{hora || "--:--:--"}</strong></div>
     </header>
     <div className="ev-novo-conteudo">
-      <div className="ev-novo-titulo"><div><small>PAINEL DO OPERADOR</small><h1>Caixa Livre</h1><p>{dataExtenso}</p></div><button type="button" className="ev-novo-sair" onClick={()=>{sessionStorage.removeItem('evolux_funcionario_validado');sessionStorage.removeItem('evolux_empresa_selecionada');window.location.assign('/selecionar-usuario')}}>Trocar usuário</button><button type="button" className="ev-novo-sair" onClick={sairPDV}><span>↪</span> Sair do PDV <kbd>Esc</kbd></button></div>
+      <div className="ev-novo-titulo"><div><small>PAINEL DO OPERADOR</small><h1>Caixa Livre</h1><p>{dataExtenso}</p></div><button type="button" className="ev-novo-sair" onClick={sairPDV}><span>↪</span> Sair do PDV <kbd>Esc</kbd></button></div>
       <div className="ev-novo-grid">
         <section className="ev-novo-principal">
           <div className="ev-novo-card ev-novo-operador"><div className="ev-novo-card-titulo"><span>⚙</span><strong>Preparar atendimento</strong></div><div className="ev-novo-campos"><label>Modo de lançamento <small>F11</small><select id="ev-modo-inicial" value={modo} onChange={e=>setModo(e.target.value)}><option>1 - VENDA</option></select></label><label>Operador <small>F12</small><select id="ev-operador-inicial" value={operador} onChange={e=>setOperador(e.target.value)}><option>ADMINISTRADOR</option></select></label></div><label className="ev-novo-busca">Buscar cliente <small>F3 • CPF/CNPJ, código ou telefone</small><div><input id="ev-cliente-inicial" value={clienteBusca} onChange={e=>setClienteBusca(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();void iniciarVenda()}}} placeholder="Informe o cliente ou deixe em branco"/><button type="button" onClick={()=>void iniciarVenda()} title="Iniciar venda">Continuar →</button></div></label></div>
+          <button type="button" onClick={()=>void abrirConsultaProdutos()} style={{display:"flex",width:"100%",alignItems:"center",gap:16,background:"#1763b6",color:"#fff",border:0,borderRadius:13,padding:"20px 22px",marginTop:15,marginBottom:12,textAlign:"left",cursor:"pointer",boxShadow:"0 8px 18px #1763b625"}}>
+            <span aria-hidden="true" style={{fontSize:31,background:"#ffffff20",borderRadius:10,padding:"8px 12px"}}>⌕</span>
+            <span style={{display:"flex",flexDirection:"column",gap:4,flex:1}}><strong style={{fontSize:19}}>CONSULTAR PRODUTOS</strong><small>Consultar preço de venda e estoque disponível</small></span>
+            <kbd style={{border:"1px solid #ffffff80",borderRadius:5,padding:"4px 7px"}}>F4</kbd>
+          </button>
+          {!turno&&<button type="button" disabled={processandoCaixa||!!abertura} onClick={()=>void iniciarVenda()} style={{width:"100%",border:"1px solid #cbd9e9",background:"#fff",color:"#102c58",borderRadius:10,padding:12,marginBottom:10,fontWeight:700,cursor:"pointer"}}>Abrir caixa</button>}
           <button type="button" className="ev-novo-iniciar" disabled={processandoCaixa||!!abertura} onClick={()=>void iniciarVenda()}><span className="ev-novo-carrinho">🛒</span><span><strong>INICIAR NOVA VENDA</strong><small>Comece um atendimento no caixa</small></span><kbd>F2</kbd></button>
           <p className="ev-novo-dica">O turno permanece aberto ao sair do PDV. Para encerrar o caixa, acesse Caixa no painel de Gestão Empresarial.</p>
         </section>
@@ -1486,6 +1517,30 @@ export default function PDV() {
         <footer><button type="button" disabled={finalizandoVenda||operacaoEnviada} onClick={fecharPagamento}>Voltar à venda (Esc)</button><button type="button" disabled={finalizandoVenda||!pagamentoValido} onClick={()=>void confirmarPagamento()}>{finalizandoVenda?"Registrando venda...":operacaoEnviada?"Consultar / tentar novamente (F12)":"Confirmar pagamento (F12)"}</button></footer>
       </>:<><p>As trocas e devoluções precisam identificar a venda original e seus itens, para registrar corretamente o estorno e a movimentação de estoque.</p><p className="ev-operacao-aviso">A operação será disponibilizada após a criação do histórico de vendas e do procedimento de estorno no Supabase. Nenhum estoque será alterado.</p><footer><button type="button" onClick={()=>setModalOperacao(null)}>Voltar à venda (Esc)</button></footer></>}
     </section></div>}
+    {consultaProdutosAberta&&<div className="ev-venda-overlay" style={{zIndex:3600}} onKeyDown={e=>{if(e.key==="Escape")setConsultaProdutosAberta(false)}}>
+      <section role="dialog" aria-modal="true" aria-label="Consulta de Produtos" style={{width:"min(780px,96vw)",maxHeight:"88dvh",background:"#fff",borderRadius:16,overflow:"hidden",display:"flex",flexDirection:"column",boxShadow:"0 20px 60px #0005"}}>
+        <header style={{background:"#102c58",color:"#fff",padding:"18px 22px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <strong style={{fontSize:20}}>Consulta de Produtos</strong>
+          <button type="button" onClick={()=>setConsultaProdutosAberta(false)} style={{color:"#fff",background:"#ffffff20",border:"1px solid #ffffff55",borderRadius:8,padding:"8px 12px",cursor:"pointer"}}>× Fechar</button>
+        </header>
+        <div style={{padding:20,overflowY:"auto"}}>
+          <label style={{display:"grid",gap:7,fontWeight:700,color:"#193c6b"}}>Buscar produto
+            <input autoFocus value={consultaProdutosBusca} onChange={e=>setConsultaProdutosBusca(e.target.value)} placeholder="Nome, código interno ou código de barras" style={{width:"100%",boxSizing:"border-box",border:"1px solid #cbd9e9",borderRadius:9,padding:13,fontSize:15}}/>
+          </label>
+          <p style={{fontSize:12,color:"#64748b"}}>Consulta somente leitura • preços de venda e estoque disponível</p>
+          {consultaProdutosErro&&<p role="alert" style={{color:"#b91c1c"}}>{consultaProdutosErro}</p>}
+          {consultaProdutosCarregando?<p>Carregando produtos...</p>:
+            <div style={{display:"grid",gap:9}}>
+              {consultaProdutosFiltrados.map(p=><div key={p.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,flexWrap:"wrap",border:"1px solid #dce5f1",borderRadius:10,padding:13}}>
+                <div style={{flex:"1 1 240px",minWidth:0}}><strong style={{color:"#102c58"}}>{p.descricao}</strong><small style={{display:"block",color:"#64748b",marginTop:5}}>Código: {p.codigo} • EAN: {p.codigo_barras||"—"}</small></div>
+                <div><small style={{display:"block",color:"#64748b"}}>Preço de venda</small><strong style={{color:"#102c58"}}>{dinheiro(Number(p.preco_venda))}</strong></div>
+                <div><small style={{display:"block",color:"#64748b"}}>Estoque</small><strong style={{color:"#102c58"}}>{Number(p.estoque_atual).toLocaleString("pt-BR")} un.</strong></div>
+              </div>)}
+              {!consultaProdutosFiltrados.length&&!consultaProdutosErro&&<p>Nenhum produto encontrado.</p>}
+            </div>}
+        </div>
+      </section>
+    </div>}
     {modalCliente&&<div className="ev-venda-overlay"><section className="ev-busca-rapida" role="dialog" aria-modal="true" aria-label="Busca rápida de produtos e clientes" onKeyDown={e=>{if(e.key==="Enter"&&abaBuscaRapida==="produtos"&&!(e.target as HTMLElement).closest("button")){e.preventDefault();confirmarProdutoBuscaRapida();}}}>
       <header className="ev-rapida-titulo"><strong>Busca Rápida</strong><button type="button" onClick={()=>setModalCliente(false)} aria-label="Fechar busca">×</button></header>
       <nav className="ev-rapida-abas"><button type="button" className={abaBuscaRapida==="produtos"?"ativo":""} onClick={()=>{setAbaBuscaRapida("produtos");setIndiceRapido(0)}}>▥ Produtos (F10)</button><button type="button" className={abaBuscaRapida==="clientes"?"ativo":""} onClick={()=>{setAbaBuscaRapida("clientes");setIndiceRapido(0)}}>♙ Clientes (F11)</button><label>Ordenação <select value={ordemRapida} onChange={e=>setOrdemRapida(e.target.value)}><option value="nome">por NOME</option><option value="codigo">por CÓDIGO</option></select></label></nav>
