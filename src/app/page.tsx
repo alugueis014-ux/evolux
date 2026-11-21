@@ -95,6 +95,8 @@ export default function Home() {
       try {
         const { error } = await supabase.auth.signInWithPassword({ email: loginType === "usuario" ? `${nomeNormalizado}@usuarios.evolux.invalid` : identifier.trim(), password });
         if (error) return setMessage(error.message === "Invalid login credentials" ? "E-mail ou senha incorretos." : "Não foi possível entrar: " + error.message);
+        sessionStorage.removeItem("evolux_funcionario_validado");
+        sessionStorage.removeItem("evolux_empresa_selecionada");
         window.location.assign("/selecionar-usuario");
       } catch { setMessage("Falha de comunicação. Verifique a internet e tente novamente."); }
       finally { setBusy(false); }

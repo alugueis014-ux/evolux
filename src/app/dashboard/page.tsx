@@ -196,6 +196,11 @@ export default function Dashboard() {
       const { data: { user }, error } = await supabase.auth.getUser();
       if (!ativo) return;
       if (error || !user) { window.location.replace("/"); return; }
+      // Verificacao de navegacao: autorizacao efetiva exige regras no servidor e RLS.
+      if (sessionStorage.getItem("evolux_funcionario_validado") !== user.id) {
+        window.location.replace("/selecionar-usuario");
+        return;
+      }
       const {data: acesso}=await supabase.from("empresa_usuarios").select("papel").eq("usuario_id",user.id).limit(1).maybeSingle();
       if(acesso?.papel!=="administrador") {window.location.replace("/pdv");return;}
       const {data: perfil}=await supabase.from("evolux_usuarios_acesso").select("ativo").eq("usuario_id",user.id).maybeSingle();
