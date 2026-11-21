@@ -87,14 +87,19 @@ export default function PDV() {
     return /^\d+(?:\.\d{1,2})?$/.test(limpo)?Math.round(Number(limpo)*100):null;
   };
   async function abrirFechamento(){
-    if(!supabase||!turno)return;
+    if(!supabase){setErroCaixa("Conexão com o Supabase indisponível.");return;}
+    if(!turno){setErroCaixa("Não existe um turno aberto para fechar.");return;}
+    if(telaVenda||carrinho.length||vendaConfirmada||modalOperacao||trocaPDVAtiva){
+      setErroCaixa("Conclua a operação de venda antes de iniciar o fechamento do caixa.");
+      return;
+    }
     setFechamentoAberto(true);setFechamentoErro("");setFechamentoStatus("");
     setFechamentoValores({dinheiro:"",pix:"",cartao:""});setFechamentoObservacao("");
     setFechamentoCarregando(true);
-    const {data,error}=await supabase.rpc("evolux_status_caixa",{p_caixa_turno_id:turno.id});
-    setFechamentoCarregando(false);
-    if(error){setFechamentoErro("Não foi possível consultar a situação do turno: "+error.message);return;}
-    if(data?.status==="pendente")setFechamentoStatus("Contagem já enviada. Aguarde a decisão do supervisor.");
+    try{
+      const {data,error}=await supabase.rpc("evolux_status_caixa",{p_caixa_turno_id:turno.id});
+      if(error){setFechamentoErro("Não foi possível consultar a situação do turno: "+error.message);return;}
+      if(data?.status==="pendente")setFechamentoStatus("Contagem já enviada. Aguarde a decisão do supervisor.");
   }
   async function enviarFechamento(){
     if(!supabase||!turno||fechamentoEnviando||fechamentoStatus)return;
@@ -860,6 +865,18 @@ export default function PDV() {
 
   useEffect(() => {
     const atalho = (e: KeyboardEvent) => {
+      if(e.key==="F10" && !e.repeat){
+        // F10 fecha o caixa apenas no painel inicial. Na busca rápida de vendas,
+        // F10 continua reservado à aba de produtos.
+        if(!telaVenda){
+          e.preventDefault();
+          if(fechamentoAberto||abertura||cancelamentoAberto||historicoAberto||consultaProdutosAberta||movCaixaTipo)return;
+          if(turno)void abrirFechamento();
+          else setErroCaixa("Nenhum turno aberto para fechar. Abra o caixa primeiro.");
+          return;
+        }
+      }
+      if(fechamentoAberto){if(e.key==="Escape"){e.preventDefault();if(!fechamentoEnviando)setFechamentoAberto(false);}return;}
       if (telaVenda) {
         if(cadastroRapido)return;
         if(trocaPDVBuscaAberta){if(e.key==="F2"){e.preventDefault();if(!e.repeat){setTrocaPDVCatalogoFiltro("");setTrocaPDVCatalogoAberto(true);}return;}if(e.key==="Escape"){e.preventDefault();if(trocaPDVCatalogoAberto)setTrocaPDVCatalogoAberto(false);else setTrocaPDVBuscaAberta(false);}return;}
@@ -938,7 +955,7 @@ export default function PDV() {
     };
     window.addEventListener("keydown", atalho);
     return () => window.removeEventListener("keydown", atalho);
-  }, [telaVenda, abertura, empresaId, usuarioId, processandoCaixa, carrinho, itemSelecionado, produtoPendente, tipoBusca, modalCliente, modalPesquisa, cadastroRapido, modalOperacao, abaBuscaRapida, indiceRapido, produtosRapidos, clientesRapidos, pagamentos, descontoPagamento, vendaConfirmada, operacaoEnviada, finalizandoVenda, historicoAberto, historicoDetalhe, correcaoVenda, correcaoSalvando, cancelamentoAberto, cancelamentoSalvando, trocaPDVFinalizar, trocaPDVBuscaAberta, trocaPDVCatalogoAberto]);
+  }, [telaVenda, abertura, empresaId, usuarioId, processandoCaixa, carrinho, itemSelecionado, produtoPendente, tipoBusca, modalCliente, modalPesquisa, cadastroRapido, modalOperacao, abaBuscaRapida, indiceRapido, produtosRapidos, clientesRapidos, pagamentos, descontoPagamento, vendaConfirmada, operacaoEnviada, finalizandoVenda, historicoAberto, historicoDetalhe, correcaoVenda, correcaoSalvando, cancelamentoAberto, cancelamentoSalvando, trocaPDVFinalizar, trocaPDVBuscaAberta, trocaPDVCatalogoAberto, turno, fechamentoAberto, fechamentoEnviando, consultaProdutosAberta, movCaixaTipo, trocaPDVAtiva, vendaConfirmada, modalOperacao]);
 
   useEffect(() => {
     let ativo = true;
@@ -1249,7 +1266,7 @@ export default function PDV() {
             <kbd style={{border:"1px solid #ffffff80",borderRadius:5,padding:"4px 7px"}}>F4</kbd>
           </button>
           {!turno&&<button type="button" disabled={processandoCaixa||!!abertura} onClick={()=>void iniciarVenda()} style={{width:"100%",border:"1px solid #cbd9e9",background:"#fff",color:"#102c58",borderRadius:10,padding:12,marginBottom:10,fontWeight:700,cursor:"pointer"}}>Abrir caixa</button>}
-          {turno&&<button type="button" onClick={()=>void abrirFechamento()} style={{width:"100%",border:"1px solid #b91c1c",background:"#b91c1c",color:"#fff",borderRadius:12,padding:"15px 18px",fontWeight:800,fontSize:16,cursor:"pointer"}}>Fechar caixa — Turno {turno.numero}</button>}
+          {turno&&<button type="button" disabled={fechamentoCarregando||fechamentoEnviando} onClick={()=>void abrirFechamento()} title="Fechar caixa (F10)" style={{width:"100%",border:"1px solid #b91c1c",background:"#b91c1c",color:"#fff",borderRadius:12,padding:"15px 18px",fontWeight:800,fontSize:16,cursor:"pointer"}}>Fechar caixa (F10) — Turno {turno.numero}</button>}
           <button type="button" className="ev-novo-iniciar" disabled={processandoCaixa||!!abertura} onClick={()=>void iniciarVenda()}><span className="ev-novo-carrinho">🛒</span><span><strong>INICIAR NOVA VENDA</strong><small>Comece um atendimento no caixa</small></span><kbd>F2</kbd></button>
           <p className="ev-novo-dica">O fechamento exige contagem cega e aprovação do supervisor. Sair do PDV não encerra o turno.</p>
         </section>
