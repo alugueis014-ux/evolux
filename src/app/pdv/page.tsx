@@ -848,11 +848,6 @@ export default function PDV() {
       const { data: { user }, error: erroAuth } = await supabase.auth.getUser();
       if (!ativo) return;
       if (erroAuth || !user) { window.location.replace("/"); return; }
-      // Verificacao de navegacao: autorizacao efetiva exige regras no servidor e RLS.
-      if (sessionStorage.getItem("evolux_funcionario_validado") !== user.id) {
-        window.location.replace("/selecionar-usuario");
-        return;
-      }
       const {data: papelAtual}=await supabase.from("empresa_usuarios").select("papel").eq("usuario_id",user.id).limit(1).maybeSingle();
       if(!papelAtual||!["administrador","vendedor"].includes(papelAtual.papel)){window.location.replace("/");return;}
       const {data: perfilAtual}=await supabase.from("evolux_usuarios_acesso").select("ativo").eq("usuario_id",user.id).maybeSingle();
