@@ -8,6 +8,7 @@ import ImportarXmlModal from "./ImportarXmlModal";
 import NotasEntradaModal from "./NotasEntradaModal";
 import ClientesModal from "./ClientesModal";
 import DespesasModal from "./DespesasModal";
+import UsuariosModal from "./UsuariosModal";
 import CaixaGestao from "./caixa/page";
 import CompletarCadastro from "../completar-cadastro/page";
 import GradeProduto from "./GradeProduto";
@@ -71,6 +72,7 @@ export default function Dashboard() {
   const [empresaAberta,setEmpresaAberta] = useState(false);
   const [fornecedoresAberto, setFornecedoresAberto] = useState(false);
   const [despesasAberto, setDespesasAberto] = useState(false);
+  const [usuariosAberto, setUsuariosAberto] = useState(false);
   const [importacaoXmlAberta, setImportacaoXmlAberta] = useState(false);
   const [notasEntradaAbertas, setNotasEntradaAbertas] = useState(false);
   const [menuNotasAberto,setMenuNotasAberto]=useState(false);
@@ -93,7 +95,7 @@ export default function Dashboard() {
   const [abaProduto, setAbaProduto] = useState<"dados" | "grade" | "fornecedores">("dados");
 
   // Apenas um cadastro principal por vez; preserva sub-janelas do cadastro ativo.
-  function abrirJanela(tipo: "produtos"|"clientes"|"fornecedores"|"empresa"|"caixa"|"notas"|"xml"|"entradas"|"despesas") {
+  function abrirJanela(tipo: "produtos"|"clientes"|"fornecedores"|"empresa"|"caixa"|"notas"|"xml"|"entradas"|"despesas"|"usuarios") {
     if (cadastroAberto || historicoAberto) {
       if (!window.confirm("Existe uma janela de produto em edição ou consulta. Deseja fechá-la para abrir outra função? Alterações não salvas poderão ser perdidas.")) return;
     }
@@ -103,6 +105,7 @@ export default function Dashboard() {
     setClientesAberto(false);
     setFornecedoresAberto(false);
     setDespesasAberto(false);
+    setUsuariosAberto(false);
     setEmpresaAberta(false);
     setCaixaAberto(false);
     setMenuNotasAberto(false);
@@ -114,6 +117,7 @@ export default function Dashboard() {
     else if (tipo === "clientes") setClientesAberto(true);
     else if (tipo === "fornecedores") setFornecedoresAberto(true);
     else if (tipo === "despesas") setDespesasAberto(true);
+    else if (tipo === "usuarios") setUsuariosAberto(true);
     else if (tipo === "empresa") setEmpresaAberta(true);
     else if (tipo === "caixa") setCaixaAberto(true);
     else if (tipo === "notas") setMenuNotasAberto(true);
@@ -121,8 +125,8 @@ export default function Dashboard() {
     else if (tipo === "entradas") setNotasEntradaAbertas(true);
   }
   function abrirCadastroMenu(acao: string) {
-    if (acao === "produtos" || acao === "clientes" || acao === "fornecedores" || acao === "empresa" || acao === "despesas") abrirJanela(acao);
-    else { setCadastrosMenuAberto(false); setAviso(acao === "pagamentos" ? "Cadastro de formas de pagamento: funcionalidade ainda em desenvolvimento." : "Cadastro de usuários e vendedores: funcionalidade ainda em desenvolvimento."); }
+    if (acao === "produtos" || acao === "clientes" || acao === "fornecedores" || acao === "empresa" || acao === "despesas" || acao === "usuarios") abrirJanela(acao);
+    else { setCadastrosMenuAberto(false); setAviso(acao === "pagamentos" ? "Cadastro de formas de pagamento: funcionalidade ainda em desenvolvimento." : "Cadastro de administradores e vendedores: funcionalidade ainda em desenvolvimento."); }
   }
 
   useEffect(() => {
@@ -142,7 +146,7 @@ export default function Dashboard() {
   useEffect(() => {
     function atalhosPainel(event: KeyboardEvent) {
       if (event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
-      if (empresaAberta || cadastrosMenuAberto || produtosAberto || clientesAberto || fornecedoresAberto || despesasAberto || importacaoXmlAberta ||
+      if (empresaAberta || cadastrosMenuAberto || produtosAberto || clientesAberto || fornecedoresAberto || despesasAberto || usuariosAberto || importacaoXmlAberta ||
           notasEntradaAbertas || menuNotasAberto || cadastroAberto || historicoAberto || caixaAberto) return;
       const alvo = event.target as HTMLElement | null;
       if (alvo?.closest("input, textarea, select, [contenteditable='true']")) return;
@@ -192,6 +196,10 @@ export default function Dashboard() {
       const { data: { user }, error } = await supabase.auth.getUser();
       if (!ativo) return;
       if (error || !user) { window.location.replace("/"); return; }
+      const {data: acesso}=await supabase.from("empresa_usuarios").select("papel").eq("usuario_id",user.id).limit(1).maybeSingle();
+      if(acesso?.papel!=="administrador") {window.location.replace("/pdv");return;}
+      const {data: perfil}=await supabase.from("evolux_usuarios_acesso").select("ativo").eq("usuario_id",user.id).maybeSingle();
+      if(perfil?.ativo===false){await supabase.auth.signOut();window.location.replace("/");return;}
       setUsuario(String(user.user_metadata?.nome || user.email || "Usuário"));
       const { data: vinculos, error: ve } = await supabase.from("empresa_usuarios").select("empresa_id").eq("usuario_id", user.id).limit(1);
       if (!ativo) return;
@@ -374,7 +382,7 @@ export default function Dashboard() {
       <div className="ev-cadastros-anchor">
         <button type="button" className={aba==="Cadastros"?"active":""} aria-expanded={cadastrosMenuAberto} aria-haspopup="menu" onClick={()=>{setAba("Cadastros");setAviso("");setCadastrosMenuAberto(v=>!v)}}>Cadastros <span aria-hidden="true">▾</span></button>
         {cadastrosMenuAberto&&<div className="ev-cadastros-menu" role="menu" aria-label="Cadastros">
-          {([["produtos","Cadastro de produtos","▣"],["clientes","Cadastro de clientes","♙"],["fornecedores","Cadastro de fornecedores","▤"],["pagamentos","Cadastro de formas de pagamento","▦"],["usuarios","Cadastro de usuários e vendedores","♧"],["empresa","Cadastro de informações da empresa","⌂"],["despesas","Cadastro de Despesas","▤"]] as const).map(([acao,titulo,icone])=><button key={acao} type="button" role="menuitem" onClick={()=>abrirCadastroMenu(acao)}><span className="ev-cadastros-icone" aria-hidden="true">{icone}</span><span>{titulo}</span>{(acao==="pagamentos"||acao==="usuarios")&&<small>Em desenvolvimento</small>}</button>)}
+          {([["usuarios","Cadastro de administradores e vendedores","♧"],["clientes","Cadastro de clientes","♙"],["despesas","Cadastro de Despesas","▤"],["fornecedores","Cadastro de fornecedores","▤"],["pagamentos","Cadastro de formas de pagamento","▦"],["empresa","Cadastro de informações da empresa","⌂"],["produtos","Cadastro de produtos","▣"]] as const).map(([acao,titulo,icone])=><button key={acao} type="button" role="menuitem" onClick={()=>abrirCadastroMenu(acao)}><span className="ev-cadastros-icone" aria-hidden="true">{icone}</span><span>{titulo}</span>{(acao==="pagamentos")&&<small>Em desenvolvimento</small>}</button>)}
         </div>}
       </div>
       {["Lançamentos", "Relatórios", "Gráficos", "Utilitários", "Ajuda"].map(item => <button type="button" key={item} className={aba === item ? "active" : ""} onClick={() => { setCadastrosMenuAberto(false);setAba(item);setAviso(`A seção ${item} será implementada em uma próxima etapa.`); }}>{item}</button>)}
@@ -399,6 +407,7 @@ export default function Dashboard() {
         <div className="ev-bottom-grid"><article className="ev-card"><h2><Icon name="layers" size={22}/> Movimentações recentes</h2><div className="ev-table"><div className="ev-table-head"><span>Data</span><span>Descrição</span><span>Valor</span></div><div className="ev-empty"><Icon name="file" size={33}/><p>O histórico de movimentações estará disponível quando os módulos operacionais forem implementados.</p></div></div></article><article className="ev-card"><h2><Icon name="bell" size={22}/> Avisos e pendências</h2><div className="ev-alert-body"><p>{pendente ? "Há informações pendentes no cadastro da empresa." : "Os avisos operacionais aparecerão quando os módulos forem configurados."}</p><Link href="/completar-cadastro">Dados da empresa →</Link></div></article></div>
       </>}
     </section>
+    {usuariosAberto && <UsuariosModal empresaId={empresaId} onClose={()=>setUsuariosAberto(false)}/>}
     {empresaAberta && <div className="ev-product-overlay ev-empresa-overlay" ><section className="ev-empresa-window" role="dialog" aria-modal="true" aria-label="Cadastro de Informações da Empresa"><CompletarCadastro embutido onClose={()=>setEmpresaAberta(false)}/></section></div>}
     {caixaAberto && <div className="ev-product-overlay ev-caixa-overlay" onMouseDown={e=>{if(e.target===e.currentTarget)setCaixaAberto(false)}}>
       <section className="ev-caixa-window" role="dialog" aria-modal="true" aria-labelledby="ev-caixa-title">

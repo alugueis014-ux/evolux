@@ -1,0 +1,20 @@
+"use client";
+import {useEffect,useState,type FormEvent} from 'react';
+import {createClient} from '@supabase/supabase-js';
+const url=process.env.NEXT_PUBLIC_SUPABASE_URL,key=process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY||process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+const db=url&&key?createClient(url,key):null;
+type Pessoa={id:string;nome:string;usuario:string;papel:string};
+export default function SelecionarUsuario(){
+ const [usuarios,setUsuarios]=useState<Pessoa[]>([]),[empresaId,setEmpresaId]=useState(''),[selecionado,setSelecionado]=useState(''),[senha,setSenha]=useState(''),[erro,setErro]=useState(''),[busy,setBusy]=useState(false),[emailEmpresa,setEmailEmpresa]=useState('');
+ useEffect(()=>{let active=true;(async()=>{if(!db){setErro('Supabase não configurado');return;}const {data:{session}}=await db.auth.getSession();if(!session){window.location.replace('/');return;}setEmailEmpresa(session.user.email||'');const r=await fetch('/api/usuarios/listar',{headers:{Authorization:`Bearer ${session.access_token}`},cache:'no-store'});const data=await r.json();if(!active)return;if(!r.ok){setErro(data.error||'Não foi possível listar usuários');return;}setUsuarios(data.usuarios||[]);setEmpresaId(data.empresaId);setSelecionado(data.usuarios?.[0]?.id||'');})();return()=>{active=false}},[]);
+ async function entrar(e:FormEvent){e.preventDefault();if(!db||busy)return;const pessoa=usuarios.find(u=>u.id===selecionado);if(!pessoa||!senha)return setErro('Selecione um usuário e informe a senha.');setBusy(true);setErro('');try{
+ const email=pessoa.usuario?`${pessoa.usuario}@usuarios.evolux.invalid`:emailEmpresa;
+ const {data,error}=await db.auth.signInWithPassword({email,password:senha});if(error||!data.user||data.user.id!==pessoa.id){await db.auth.signOut();setErro('Usuário ou senha incorretos. Entre novamente com a conta da empresa.');return;}
+ const {data:vinculo,error:ve}=await db.from('empresa_usuarios').select('papel').eq('empresa_id',empresaId).eq('usuario_id',data.user.id).maybeSingle();
+ const {data:perfil}=await db.from('evolux_usuarios_acesso').select('ativo').eq('empresa_id',empresaId).eq('usuario_id',data.user.id).maybeSingle();
+ if(ve||!vinculo||perfil?.ativo===false||!['administrador','vendedor'].includes(vinculo.papel)){await db.auth.signOut();setErro('Acesso não autorizado ou usuário desativado.');return;}
+ sessionStorage.setItem('evolux_funcionario_validado',data.user.id);sessionStorage.setItem('evolux_empresa_selecionada',empresaId);
+ window.location.replace(vinculo.papel==='vendedor'?'/pdv':'/dashboard');
+ }catch{setErro('Falha de comunicação. Tente novamente.')}finally{setBusy(false)}}
+ return <main style={{minHeight:'100vh',display:'grid',placeItems:'center',background:'#eef3fa',padding:20,fontFamily:'Arial,sans-serif'}}><section style={{width:'min(430px,100%)',background:'white',borderRadius:18,overflow:'hidden',boxShadow:'0 15px 40px #102c5820'}}><header style={{background:'#102c58',color:'white',padding:24}}><h1 style={{margin:0,fontSize:22}}>EVOLUX</h1><p style={{marginBottom:0}}>Selecione seu usuário</p></header><form onSubmit={entrar} style={{padding:25,display:'grid',gap:15}}><label style={{display:'grid',gap:7}}>Funcionário<select required value={selecionado} onChange={e=>setSelecionado(e.target.value)} style={{padding:12,borderRadius:10,border:'1px solid #cbd5e1'}}>{usuarios.map(u=><option key={u.id} value={u.id}>{u.nome} — {u.papel==='administrador'?'Administrador':'Vendedor'}</option>)}</select></label><label style={{display:'grid',gap:7}}>Senha individual<input type="password" autoComplete="current-password" required value={senha} onChange={e=>setSenha(e.target.value)} style={{padding:12,borderRadius:10,border:'1px solid #cbd5e1'}}/></label>{erro&&<p role="alert" style={{color:'#b91c1c'}}>{erro}</p>}<button disabled={busy||!usuarios.length} style={{padding:13,background:'#102c58',color:'white',border:0,borderRadius:10}}>{busy?'Validando...':'Acessar sistema'}</button><button type="button" onClick={async()=>{await db?.auth.signOut();window.location.replace('/')}} style={{background:'transparent',border:0,color:'#275ba3'}}>Trocar empresa</button></form></section></main>;
+}

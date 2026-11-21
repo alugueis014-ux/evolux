@@ -848,6 +848,10 @@ export default function PDV() {
       const { data: { user }, error: erroAuth } = await supabase.auth.getUser();
       if (!ativo) return;
       if (erroAuth || !user) { window.location.replace("/"); return; }
+      const {data: papelAtual}=await supabase.from("empresa_usuarios").select("papel").eq("usuario_id",user.id).limit(1).maybeSingle();
+      if(!papelAtual||!["administrador","vendedor"].includes(papelAtual.papel)){window.location.replace("/");return;}
+      const {data: perfilAtual}=await supabase.from("evolux_usuarios_acesso").select("ativo").eq("usuario_id",user.id).maybeSingle();
+      if(perfilAtual?.ativo===false){await supabase.auth.signOut();window.location.replace("/");return;}
       setUsuarioId(user.id);
       const { data: vinculo, error: erroVinculo } = await supabase.from("empresa_usuarios").select("empresa_id").eq("usuario_id", user.id).limit(1);
       if (!ativo) return;
