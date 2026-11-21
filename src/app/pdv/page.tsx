@@ -881,7 +881,13 @@ export default function PDV() {
           return;
         }
       }
-      if(fechamentoAberto){if(e.key==="Escape"){e.preventDefault();if(!fechamentoEnviando)setFechamentoAberto(false);}return;}
+      if(!telaVenda && e.key==="F4"){
+        e.preventDefault();
+        if(!e.repeat&&!fechamentoAberto&&!abertura&&!cancelamentoAberto&&!historicoAberto&&!movCaixaTipo&&!consultaProdutosAberta)void abrirConsultaProdutos();
+        return;
+      }
+      if(consultaProdutosAberta){if(e.key==="Escape"){e.preventDefault();setConsultaProdutosAberta(false);}return;}
+            if(fechamentoAberto){if(e.key==="Escape"){e.preventDefault();if(!fechamentoEnviando)setFechamentoAberto(false);}return;}
       if (telaVenda) {
         if(cadastroRapido)return;
         if(trocaPDVBuscaAberta){if(e.key==="F2"){e.preventDefault();if(!e.repeat){setTrocaPDVCatalogoFiltro("");setTrocaPDVCatalogoAberto(true);}return;}if(e.key==="Escape"){e.preventDefault();if(trocaPDVCatalogoAberto)setTrocaPDVCatalogoAberto(false);else setTrocaPDVBuscaAberta(false);}return;}
@@ -973,6 +979,26 @@ export default function PDV() {
       if(!papelAtual||!["administrador","vendedor"].includes(papelAtual.papel)){window.location.replace("/");return;}
       const {data: perfilAtual}=await supabase.from("evolux_usuarios_acesso").select("ativo").eq("usuario_id",user.id).maybeSingle();
       if(perfilAtual?.ativo===false){await supabase.auth.signOut();window.location.replace("/");return;}
+      const funcionarioId=sessionStorage.getItem("evolux_funcionario_validado");
+      const empresaSelecionada=sessionStorage.getItem("evolux_empresa_selecionada");
+      if(!funcionarioId||!empresaSelecionada){window.location.replace("/selecionar-usuario");return;}
+      try{
+        const {data:{session}}=await supabase.auth.getSession();
+        if(!session)throw new Error("Sessão expirada");
+        const resposta=await fetch("/api/funcionarios",{
+          headers:{Authorization:`Bearer ${session.access_token}`},cache:"no-store"
+        });
+        if(!resposta.ok)throw new Error("Não foi possível identificar o funcionário.");
+        const dados=await resposta.json();
+        const funcionario=(dados.usuarios||[]).find((f:{id:string;ativo:boolean;nome:string})=>f.id===funcionarioId&&f.ativo);
+        if(!funcionario||String(dados.empresaId)!==empresaSelecionada){
+          window.location.replace("/selecionar-usuario");return;
+        }
+        if(ativo)setOperador(funcionario.nome);
+      }catch(e){
+        if(ativo){setErro(e instanceof Error?e.message:"Falha ao identificar operador.");setCarregando(false);}
+        return;
+      }
       setUsuarioId(user.id);
       const { data: vinculo, error: erroVinculo } = await supabase.from("empresa_usuarios").select("empresa_id").eq("usuario_id", user.id).limit(1);
       if (!ativo) return;
@@ -1264,7 +1290,7 @@ export default function PDV() {
       <div className="ev-novo-titulo"><div><small>PAINEL DO OPERADOR</small><h1>Caixa Livre</h1><p>{dataExtenso}</p></div><button type="button" className="ev-novo-sair" onClick={sairPDV}><span>↪</span> Sair do PDV <kbd>Esc</kbd></button></div>
       <div className="ev-novo-grid">
         <section className="ev-novo-principal">
-          <div className="ev-novo-card ev-novo-operador"><div className="ev-novo-card-titulo"><span>⚙</span><strong>Preparar atendimento</strong></div><div className="ev-novo-campos"><label>Modo de lançamento <small>F11</small><select id="ev-modo-inicial" value={modo} onChange={e=>setModo(e.target.value)}><option>1 - VENDA</option></select></label><label>Operador <small>F12</small><select id="ev-operador-inicial" value={operador} onChange={e=>setOperador(e.target.value)}><option>ADMINISTRADOR</option></select></label></div><label className="ev-novo-busca">Buscar cliente <small>F3 • CPF/CNPJ, código ou telefone</small><div><input id="ev-cliente-inicial" value={clienteBusca} onChange={e=>setClienteBusca(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();void iniciarVenda()}}} placeholder="Informe o cliente ou deixe em branco"/><button type="button" onClick={()=>void iniciarVenda()} title="Iniciar venda">Continuar →</button></div></label></div>
+          <div className="ev-novo-card ev-novo-operador"><div className="ev-novo-card-titulo"><span>⚙</span><strong>Preparar atendimento</strong></div><div className="ev-novo-campos"><label>Modo de lançamento <small>F11</small><select id="ev-modo-inicial" value={modo} onChange={e=>setModo(e.target.value)}><option>1 - VENDA</option></select></label><label>Operador <small>F12</small><select id="ev-operador-inicial" value={operador} disabled><option value={operador}>{operador}</option></select></label></div><label className="ev-novo-busca">Buscar cliente <small>F3 • CPF/CNPJ, código ou telefone</small><div><input id="ev-cliente-inicial" value={clienteBusca} onChange={e=>setClienteBusca(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();void iniciarVenda()}}} placeholder="Informe o cliente ou deixe em branco"/><button type="button" onClick={()=>void iniciarVenda()} title="Iniciar venda">Continuar →</button></div></label></div>
           <button type="button" onClick={()=>void abrirConsultaProdutos()} style={{display:"flex",width:"100%",alignItems:"center",gap:16,background:"#1763b6",color:"#fff",border:0,borderRadius:13,padding:"20px 22px",marginTop:15,marginBottom:12,textAlign:"left",cursor:"pointer",boxShadow:"0 8px 18px #1763b625"}}>
             <span aria-hidden="true" style={{fontSize:31,background:"#ffffff20",borderRadius:10,padding:"8px 12px"}}>⌕</span>
             <span style={{display:"flex",flexDirection:"column",gap:4,flex:1}}><strong style={{fontSize:19}}>CONSULTAR PRODUTOS</strong><small>Consultar preço de venda e estoque disponível</small></span>
@@ -1413,6 +1439,54 @@ export default function PDV() {
     .ev-caixa-livre button:disabled,.ev-caixa-livre select:disabled{cursor:not-allowed}
     .ev-caixa-livre{min-height:100dvh;display:flex;flex-direction:column;background:#f4f7fc;color:#142744;font:14px Arial,Helvetica,sans-serif}.ev-caixa-livre *{box-sizing:border-box}.ev-novo-topo{background:#102b55;color:#fff;min-height:92px;padding:20px clamp(20px,4vw,72px);display:flex;justify-content:space-between;align-items:center;gap:20px}.ev-novo-marca{display:flex;align-items:center;gap:12px}.ev-novo-simbolo{width:45px;height:45px;border-radius:12px;background:#2479d8;display:grid;place-items:center;font-weight:900;font-size:28px}.ev-novo-marca strong{font-size:25px;letter-spacing:1px}.ev-novo-marca strong span{color:#5ac9ff}.ev-novo-marca small{display:block;font-size:10px;letter-spacing:1.6px;color:#b8d2f1;margin-top:3px}.ev-novo-turno{display:flex;align-items:center;gap:15px;font-size:12px;color:#c8d9ef}.ev-novo-turno strong{font:700 20px monospace;color:#fff}.ev-novo-status{display:flex;align-items:center;gap:7px;background:#ffffff19;padding:9px 12px;border-radius:30px;color:#fff}.ev-novo-status i{width:8px;height:8px;background:#48e0a0;border-radius:50%}.ev-novo-conteudo{width:min(1200px,calc(100% - 40px));margin:0 auto;padding:35px 0 50px;flex:1}.ev-novo-titulo{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:28px}.ev-novo-titulo small,.ev-novo-secao small{font-size:11px;color:#4771a6;font-weight:800;letter-spacing:1.3px}.ev-novo-titulo h1{font-size:35px;line-height:1.15;margin:7px 0;color:#132c50}.ev-novo-titulo p{color:#697c96;margin:0;text-transform:capitalize}.ev-novo-sair{display:flex;align-items:center;gap:9px;background:#fff;border:1px solid #d6e0ed;color:#233c5e;padding:12px 15px;border-radius:11px;font-weight:700;cursor:pointer;box-shadow:0 2px 8px #102b5508}.ev-novo-sair:hover{border-color:#93afce;background:#f9fbff}.ev-novo-sair>span{font-size:20px}.ev-novo-sair kbd,.ev-novo-iniciar kbd{font:700 12px Arial,sans-serif;border:1px solid #d8e1ed;border-radius:5px;padding:4px 7px;color:#6c8099}.ev-novo-grid{display:grid;grid-template-columns:minmax(0,1.12fr) minmax(0,1fr);gap:24px;align-items:start}.ev-novo-principal{display:flex;flex-direction:column;gap:18px}.ev-novo-card,.ev-novo-lateral{background:#fff;border:1px solid #dce5f1;border-radius:17px;padding:25px;box-shadow:0 6px 22px #17365b0b}.ev-novo-card-titulo{display:flex;align-items:center;gap:10px;font-size:17px;margin-bottom:22px}.ev-novo-card-titulo>span{background:#edf4ff;color:#1a5da9;padding:9px;border-radius:9px}.ev-novo-campos{display:grid;grid-template-columns:1fr 1fr;gap:14px}.ev-novo-campos label,.ev-novo-busca{display:block;font-weight:700;font-size:12px;color:#294363}.ev-novo-campos small,.ev-novo-busca small{font-weight:400;color:#7b8ca3;margin-left:5px}.ev-novo-campos select,.ev-novo-busca input{display:block;margin-top:9px;width:100%;height:43px;padding:0 12px;border:1px solid #d0ddeb;border-radius:9px;background:#fff;color:#1d3555;font:14px Arial,sans-serif}.ev-novo-busca{margin-top:21px}.ev-novo-busca>div{display:flex;gap:9px}.ev-novo-busca input{flex:1;min-width:0}.ev-novo-busca button{margin-top:9px;background:#edf4ff;color:#154d90;border:1px solid #cbdcf1;border-radius:9px;padding:0 14px;font-weight:700;cursor:pointer}.ev-novo-iniciar{width:100%;min-height:105px;background:#137246;color:#fff;border:0;border-radius:15px;display:flex;align-items:center;gap:18px;text-align:left;padding:22px 25px;cursor:pointer;box-shadow:0 10px 20px #13724620}.ev-novo-iniciar:hover{background:#0f613b}.ev-novo-iniciar:disabled{opacity:.6;cursor:wait}.ev-novo-carrinho{font-size:30px;background:#ffffff24;border-radius:12px;padding:12px}.ev-novo-iniciar strong{display:block;font-size:20px;letter-spacing:.3px}.ev-novo-iniciar small{display:block;font-size:12px;color:#d3f7e3;margin-top:5px}.ev-novo-iniciar kbd{margin-left:auto;border-color:#ffffff77;color:#fff}.ev-novo-dica{font-size:12px;line-height:1.5;color:#6b7e97;margin:0 3px}.ev-novo-secao h2{font-size:20px;margin:7px 0}.ev-novo-secao p{color:#71839c;font-size:12px;line-height:1.5;margin:0 0 18px}.ev-novo-acoes{display:grid;gap:10px}.ev-novo-acoes button{width:100%;display:flex;align-items:center;text-align:left;gap:13px;background:#f8fafd;border:1px solid #e1e8f1;border-radius:12px;padding:15px 13px;color:#334963}.ev-novo-acoes button:disabled{cursor:not-allowed}.ev-novo-icone{display:grid;place-items:center;flex:none;width:40px;height:40px;background:#eaf1fa;border-radius:10px;font-size:24px;color:#47719d}.ev-novo-acoes button>span:nth-child(2){flex:1}.ev-novo-acoes strong{display:block;font-size:13px}.ev-novo-acoes small{display:block;font-size:11px;margin-top:4px;color:#75879c}.ev-novo-acoes em{font-size:10px;font-style:normal;background:#eaf0f7;color:#7b8ca3;border-radius:20px;padding:6px 8px;white-space:nowrap}.ev-novo-rodape{display:flex;justify-content:space-between;padding:14px clamp(20px,4vw,72px);border-top:1px solid #e1e8f1;background:#fff;font-size:11px;color:#8190a3}@media(max-width:900px){.ev-novo-grid{grid-template-columns:1fr}.ev-novo-topo{flex-wrap:wrap}.ev-novo-turno{flex-wrap:wrap}.ev-novo-conteudo{padding-top:25px}}@media(max-width:550px){.ev-novo-titulo{align-items:flex-start}.ev-novo-titulo h1{font-size:28px}.ev-novo-sair{font-size:0}.ev-novo-sair kbd{font-size:11px}.ev-novo-campos{grid-template-columns:1fr}.ev-novo-card,.ev-novo-lateral{padding:18px}.ev-novo-busca>div{flex-direction:column}.ev-novo-busca button{height:40px}.ev-novo-iniciar strong{font-size:15px}.ev-novo-iniciar{padding:15px;gap:10px}.ev-novo-turno>span:nth-child(2){display:none}}
     `}</style>
+    {fechamentoAberto&&<div className="ev-venda-overlay" style={{zIndex:3700}}>
+      <section role="dialog" aria-modal="true" aria-label="Fechamento de caixa" style={{width:"min(560px,96vw)",maxHeight:"90dvh",overflowY:"auto",background:"#fff",borderRadius:16,boxShadow:"0 20px 60px #0005"}}>
+        <header style={{background:"#102c58",color:"#fff",padding:"18px 22px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12}}>
+          <div><small style={{color:"#c5d8f3"}}>CONTAGEM CEGA</small><h2 style={{margin:"4px 0 0",fontSize:21}}>Fechamento do turno {turno?.numero}</h2></div>
+          <button type="button" disabled={fechamentoEnviando} onClick={()=>setFechamentoAberto(false)} style={{background:"#ffffff20",border:"1px solid #ffffff55",color:"#fff",borderRadius:8,padding:9,cursor:"pointer"}}>× Fechar</button>
+        </header>
+        <div style={{padding:22,display:"grid",gap:15,color:"#193354"}}>
+          <p style={{margin:0,fontSize:13,lineHeight:1.5,color:"#516782"}}>Informe os valores efetivamente encontrados. Os valores esperados não serão exibidos ao operador. O fechamento definitivo depende de aprovação.</p>
+          {fechamentoCarregando?<p>Consultando situação do turno...</p>:fechamentoStatus?<p role="status" style={{background:"#eaf7ef",color:"#176b43",padding:13,borderRadius:9}}>{fechamentoStatus}</p>:<>
+            {([ ["dinheiro","Dinheiro contado na gaveta"],["pix","Total dos comprovantes PIX"],["cartao","Total dos comprovantes de cartão"] ] as const).map(([chave,rotulo])=><label key={chave} style={{display:"grid",gap:7,fontWeight:700,fontSize:13}}>{rotulo} (R$)
+              <input inputMode="decimal" autoComplete="off" placeholder="0,00" value={fechamentoValores[chave]} onChange={e=>setFechamentoValores(v=>({...v,[chave]:e.target.value}))} disabled={fechamentoEnviando} style={{width:"100%",boxSizing:"border-box",padding:12,border:"1px solid #cbd5e1",borderRadius:9,fontSize:16}}/>
+            </label>)}
+            <label style={{display:"grid",gap:7,fontWeight:700,fontSize:13}}>Observação (opcional)
+              <textarea rows={2} maxLength={1000} value={fechamentoObservacao} onChange={e=>setFechamentoObservacao(e.target.value)} disabled={fechamentoEnviando} style={{width:"100%",boxSizing:"border-box",padding:12,border:"1px solid #cbd5e1",borderRadius:9}}/>
+            </label>
+          </>}
+          {fechamentoErro&&<p role="alert" style={{color:"#b91c1c",margin:0}}>{fechamentoErro}</p>}
+          <div style={{display:"flex",justifyContent:"flex-end",gap:9,flexWrap:"wrap"}}>
+            <button type="button" disabled={fechamentoEnviando} onClick={()=>setFechamentoAberto(false)} style={{padding:"11px 16px",borderRadius:9,background:"#fff",color:"#193354",border:"1px solid #cbd5e1",cursor:"pointer"}}>Voltar</button>
+            {!fechamentoStatus&&!fechamentoCarregando&&<button type="button" disabled={fechamentoEnviando} onClick={()=>void enviarFechamento()} style={{padding:"11px 16px",borderRadius:9,background:"#102c58",color:"#fff",border:0,fontWeight:700,cursor:"pointer"}}>{fechamentoEnviando?"Enviando...":"Enviar para supervisão"}</button>}
+          </div>
+        </div>
+      </section>
+    </div>}
+    {consultaProdutosAberta&&<div className="ev-venda-overlay" style={{zIndex:3600}} onKeyDown={e=>{if(e.key==="Escape")setConsultaProdutosAberta(false)}}>
+      <section role="dialog" aria-modal="true" aria-label="Consulta de Produtos" style={{width:"min(780px,96vw)",maxHeight:"88dvh",background:"#fff",borderRadius:16,overflow:"hidden",display:"flex",flexDirection:"column",boxShadow:"0 20px 60px #0005"}}>
+        <header style={{background:"#102c58",color:"#fff",padding:"18px 22px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <strong style={{fontSize:20}}>Consulta de Produtos</strong>
+          <button type="button" onClick={()=>setConsultaProdutosAberta(false)} style={{color:"#fff",background:"#ffffff20",border:"1px solid #ffffff55",borderRadius:8,padding:"8px 12px",cursor:"pointer"}}>× Fechar</button>
+        </header>
+        <div style={{padding:20,overflowY:"auto"}}>
+          <label style={{display:"grid",gap:7,fontWeight:700,color:"#193c6b"}}>Buscar produto
+            <input autoFocus value={consultaProdutosBusca} onChange={e=>setConsultaProdutosBusca(e.target.value)} placeholder="Nome, código interno ou código de barras" style={{width:"100%",boxSizing:"border-box",border:"1px solid #cbd9e9",borderRadius:9,padding:13,fontSize:15}}/>
+          </label>
+          <p style={{fontSize:12,color:"#64748b"}}>Consulta somente leitura • preços de venda e estoque disponível</p>
+          {consultaProdutosErro&&<p role="alert" style={{color:"#b91c1c"}}>{consultaProdutosErro}</p>}
+          {consultaProdutosCarregando?<p>Carregando produtos...</p>:
+            <div style={{display:"grid",gap:9}}>
+              {consultaProdutosFiltrados.map(p=><div key={p.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,flexWrap:"wrap",border:"1px solid #dce5f1",borderRadius:10,padding:13}}>
+                <div style={{flex:"1 1 240px",minWidth:0}}><strong style={{color:"#102c58"}}>{p.descricao}</strong><small style={{display:"block",color:"#64748b",marginTop:5}}>Código: {p.codigo} • EAN: {p.codigo_barras||"—"}</small></div>
+                <div><small style={{display:"block",color:"#64748b"}}>Preço de venda</small><strong style={{color:"#102c58"}}>{dinheiro(Number(p.preco_venda))}</strong></div>
+                <div><small style={{display:"block",color:"#64748b"}}>Estoque</small><strong style={{color:"#102c58"}}>{Number(p.estoque_atual).toLocaleString("pt-BR")} un.</strong></div>
+              </div>)}
+              {!consultaProdutosFiltrados.length&&!consultaProdutosErro&&<p>Nenhum produto encontrado.</p>}
+            </div>}
+        </div>
+      </section>
+    </div>}
   </main>;
 
   return <main className="ev-venda-tela">
@@ -1579,54 +1653,6 @@ export default function PDV() {
         <footer><button type="button" disabled={finalizandoVenda||operacaoEnviada} onClick={fecharPagamento}>Voltar à venda (Esc)</button><button type="button" disabled={finalizandoVenda||!pagamentoValido} onClick={()=>void confirmarPagamento()}>{finalizandoVenda?"Registrando venda...":operacaoEnviada?"Consultar / tentar novamente (F12)":"Confirmar pagamento (F12)"}</button></footer>
       </>:<><p>As trocas e devoluções precisam identificar a venda original e seus itens, para registrar corretamente o estorno e a movimentação de estoque.</p><p className="ev-operacao-aviso">A operação será disponibilizada após a criação do histórico de vendas e do procedimento de estorno no Supabase. Nenhum estoque será alterado.</p><footer><button type="button" onClick={()=>setModalOperacao(null)}>Voltar à venda (Esc)</button></footer></>}
     </section></div>}
-    {fechamentoAberto&&<div className="ev-venda-overlay" style={{zIndex:3700}}>
-      <section role="dialog" aria-modal="true" aria-label="Fechamento de caixa" style={{width:"min(560px,96vw)",maxHeight:"90dvh",overflowY:"auto",background:"#fff",borderRadius:16,boxShadow:"0 20px 60px #0005"}}>
-        <header style={{background:"#102c58",color:"#fff",padding:"18px 22px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12}}>
-          <div><small style={{color:"#c5d8f3"}}>CONTAGEM CEGA</small><h2 style={{margin:"4px 0 0",fontSize:21}}>Fechamento do turno {turno?.numero}</h2></div>
-          <button type="button" disabled={fechamentoEnviando} onClick={()=>setFechamentoAberto(false)} style={{background:"#ffffff20",border:"1px solid #ffffff55",color:"#fff",borderRadius:8,padding:9,cursor:"pointer"}}>× Fechar</button>
-        </header>
-        <div style={{padding:22,display:"grid",gap:15,color:"#193354"}}>
-          <p style={{margin:0,fontSize:13,lineHeight:1.5,color:"#516782"}}>Informe os valores efetivamente encontrados. Os valores esperados não serão exibidos ao operador. O fechamento definitivo depende de aprovação.</p>
-          {fechamentoCarregando?<p>Consultando situação do turno...</p>:fechamentoStatus?<p role="status" style={{background:"#eaf7ef",color:"#176b43",padding:13,borderRadius:9}}>{fechamentoStatus}</p>:<>
-            {([ ["dinheiro","Dinheiro contado na gaveta"],["pix","Total dos comprovantes PIX"],["cartao","Total dos comprovantes de cartão"] ] as const).map(([chave,rotulo])=><label key={chave} style={{display:"grid",gap:7,fontWeight:700,fontSize:13}}>{rotulo} (R$)
-              <input inputMode="decimal" autoComplete="off" placeholder="0,00" value={fechamentoValores[chave]} onChange={e=>setFechamentoValores(v=>({...v,[chave]:e.target.value}))} disabled={fechamentoEnviando} style={{width:"100%",boxSizing:"border-box",padding:12,border:"1px solid #cbd5e1",borderRadius:9,fontSize:16}}/>
-            </label>)}
-            <label style={{display:"grid",gap:7,fontWeight:700,fontSize:13}}>Observação (opcional)
-              <textarea rows={2} maxLength={1000} value={fechamentoObservacao} onChange={e=>setFechamentoObservacao(e.target.value)} disabled={fechamentoEnviando} style={{width:"100%",boxSizing:"border-box",padding:12,border:"1px solid #cbd5e1",borderRadius:9}}/>
-            </label>
-          </>}
-          {fechamentoErro&&<p role="alert" style={{color:"#b91c1c",margin:0}}>{fechamentoErro}</p>}
-          <div style={{display:"flex",justifyContent:"flex-end",gap:9,flexWrap:"wrap"}}>
-            <button type="button" disabled={fechamentoEnviando} onClick={()=>setFechamentoAberto(false)} style={{padding:"11px 16px",borderRadius:9,background:"#fff",color:"#193354",border:"1px solid #cbd5e1",cursor:"pointer"}}>Voltar</button>
-            {!fechamentoStatus&&!fechamentoCarregando&&<button type="button" disabled={fechamentoEnviando} onClick={()=>void enviarFechamento()} style={{padding:"11px 16px",borderRadius:9,background:"#102c58",color:"#fff",border:0,fontWeight:700,cursor:"pointer"}}>{fechamentoEnviando?"Enviando...":"Enviar para supervisão"}</button>}
-          </div>
-        </div>
-      </section>
-    </div>}
-    {consultaProdutosAberta&&<div className="ev-venda-overlay" style={{zIndex:3600}} onKeyDown={e=>{if(e.key==="Escape")setConsultaProdutosAberta(false)}}>
-      <section role="dialog" aria-modal="true" aria-label="Consulta de Produtos" style={{width:"min(780px,96vw)",maxHeight:"88dvh",background:"#fff",borderRadius:16,overflow:"hidden",display:"flex",flexDirection:"column",boxShadow:"0 20px 60px #0005"}}>
-        <header style={{background:"#102c58",color:"#fff",padding:"18px 22px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-          <strong style={{fontSize:20}}>Consulta de Produtos</strong>
-          <button type="button" onClick={()=>setConsultaProdutosAberta(false)} style={{color:"#fff",background:"#ffffff20",border:"1px solid #ffffff55",borderRadius:8,padding:"8px 12px",cursor:"pointer"}}>× Fechar</button>
-        </header>
-        <div style={{padding:20,overflowY:"auto"}}>
-          <label style={{display:"grid",gap:7,fontWeight:700,color:"#193c6b"}}>Buscar produto
-            <input autoFocus value={consultaProdutosBusca} onChange={e=>setConsultaProdutosBusca(e.target.value)} placeholder="Nome, código interno ou código de barras" style={{width:"100%",boxSizing:"border-box",border:"1px solid #cbd9e9",borderRadius:9,padding:13,fontSize:15}}/>
-          </label>
-          <p style={{fontSize:12,color:"#64748b"}}>Consulta somente leitura • preços de venda e estoque disponível</p>
-          {consultaProdutosErro&&<p role="alert" style={{color:"#b91c1c"}}>{consultaProdutosErro}</p>}
-          {consultaProdutosCarregando?<p>Carregando produtos...</p>:
-            <div style={{display:"grid",gap:9}}>
-              {consultaProdutosFiltrados.map(p=><div key={p.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,flexWrap:"wrap",border:"1px solid #dce5f1",borderRadius:10,padding:13}}>
-                <div style={{flex:"1 1 240px",minWidth:0}}><strong style={{color:"#102c58"}}>{p.descricao}</strong><small style={{display:"block",color:"#64748b",marginTop:5}}>Código: {p.codigo} • EAN: {p.codigo_barras||"—"}</small></div>
-                <div><small style={{display:"block",color:"#64748b"}}>Preço de venda</small><strong style={{color:"#102c58"}}>{dinheiro(Number(p.preco_venda))}</strong></div>
-                <div><small style={{display:"block",color:"#64748b"}}>Estoque</small><strong style={{color:"#102c58"}}>{Number(p.estoque_atual).toLocaleString("pt-BR")} un.</strong></div>
-              </div>)}
-              {!consultaProdutosFiltrados.length&&!consultaProdutosErro&&<p>Nenhum produto encontrado.</p>}
-            </div>}
-        </div>
-      </section>
-    </div>}
     {modalCliente&&<div className="ev-venda-overlay"><section className="ev-busca-rapida" role="dialog" aria-modal="true" aria-label="Busca rápida de produtos e clientes" onKeyDown={e=>{if(e.key==="Enter"&&abaBuscaRapida==="produtos"&&!(e.target as HTMLElement).closest("button")){e.preventDefault();confirmarProdutoBuscaRapida();}}}>
       <header className="ev-rapida-titulo"><strong>Busca Rápida</strong><button type="button" onClick={()=>setModalCliente(false)} aria-label="Fechar busca">×</button></header>
       <nav className="ev-rapida-abas"><button type="button" className={abaBuscaRapida==="produtos"?"ativo":""} onClick={()=>{setAbaBuscaRapida("produtos");setIndiceRapido(0)}}>▥ Produtos (F10)</button><button type="button" className={abaBuscaRapida==="clientes"?"ativo":""} onClick={()=>{setAbaBuscaRapida("clientes");setIndiceRapido(0)}}>♙ Clientes (F11)</button><label>Ordenação <select value={ordemRapida} onChange={e=>setOrdemRapida(e.target.value)}><option value="nome">por NOME</option><option value="codigo">por CÓDIGO</option></select></label></nav>
