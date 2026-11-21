@@ -158,6 +158,8 @@ export default function PDV() {
   const [adminCancelamentoPin,setAdminCancelamentoPin]=useState("");
   const [mostrarPinCancelamento,setMostrarPinCancelamento]=useState(false);
   const [autorizacaoCancelamentoAberta,setAutorizacaoCancelamentoAberta]=useState(false);
+  const [cancelamentoAutorizado,setCancelamentoAutorizado]=useState(false);
+  const [validandoAdminCancelamento,setValidandoAdminCancelamento]=useState(false);
   async function carregarAdministradoresCancelamento(){
     if(!supabase)return;
     const {data:{session}}=await supabase.auth.getSession();
@@ -170,8 +172,22 @@ export default function PDV() {
       setAdminsCancelamento(lista);setAdminCancelamentoId(lista[0]?.id||"");
     }catch(e){setCancelamentoErro(e instanceof Error?e.message:"Falha ao consultar administradores");}
   }
+  async function validarAdministradorCancelamento(){
+    if(!supabase||!empresaId||!adminCancelamentoId||adminCancelamentoPin.length<3||validandoAdminCancelamento)return;
+    setValidandoAdminCancelamento(true);setCancelamentoErro("");
+    try{
+      const {data,error}=await supabase.rpc("evolux_verificar_pin_funcionario",{
+        p_empresa:empresaId,p_funcionario:adminCancelamentoId,p_pin:adminCancelamentoPin
+      });
+      if(error)throw new Error("Não foi possível validar o PIN do administrador.");
+      const resultado=Array.isArray(data)?data[0]:null;
+      if(!resultado?.autorizado||resultado.perfil!=="administrador")throw new Error(resultado?.motivo||"Credenciais de administrador inválidas.");
+      setCancelamentoAutorizado(true);setAutorizacaoCancelamentoAberta(false);
+    }catch(e){setCancelamentoErro(e instanceof Error?e.message:"Autorização negada.");setAdminCancelamentoPin("");}
+    finally{setValidandoAdminCancelamento(false);}
+  }
   function abrirCancelamentos(){
-    setAdminCancelamentoPin("");setAutorizacaoCancelamentoAberta(false);void carregarAdministradoresCancelamento();
+    setAdminCancelamentoPin("");setCancelamentoAutorizado(false);setAutorizacaoCancelamentoAberta(false);void carregarAdministradoresCancelamento();
     setCancelamentoAberto(true);setCancelamentoBusca("");setCancelamentoData("");
     setCancelamentoCaixa("");setCancelamentoTurno("");setCancelamentoResultados([]);
     setCancelamentoPesquisado(false);setCancelamentoListaPagamentos([]);setCancelamentoLimite(false);
@@ -182,7 +198,7 @@ export default function PDV() {
         .then(({data,error})=>{if(!error)setCancelamentoTurnos((data||[]) as Record<string,unknown>[]);});
     }
   }
-  function fecharCancelamentos(){if(!cancelamentoSalvando&&!trocaSalvando){setAutorizacaoCancelamentoAberta(false);setAdminCancelamentoPin("");setCancelamentoAberto(false);}}
+  function fecharCancelamentos(){if(!cancelamentoSalvando&&!trocaSalvando){setCancelamentoAutorizado(false);setAutorizacaoCancelamentoAberta(false);setAdminCancelamentoPin("");setCancelamentoAberto(false);}}
   const cancelamentoCaixas=Array.from(new Set(cancelamentoTurnos.map(t=>String(t.operador_id||"")).filter(Boolean)));
   const cancelamentoTurnosFiltrados=cancelamentoTurnos.filter(t=>!cancelamentoCaixa||String(t.operador_id)===cancelamentoCaixa);
   const nomeFormaCancelamento=(forma:unknown)=>({dinheiro:"Dinheiro",pix:"PIX",cartao:"Cartão"} as Record<string,string>)[String(forma)]||String(forma);
@@ -230,7 +246,7 @@ export default function PDV() {
   async function selecionarVendaCancelamento(venda:Record<string,unknown>){
     if(!supabase||cancelamentoCarregando)return;
     setCancelamentoCarregando(true);setCancelamentoErro("");setCancelamentoSucesso("");
-    setCancelamentoVenda(null);setCancelamentoItens([]);setCancelamentoPagamentos([]);setCancelamentoMotivo("");setAutorizacaoCancelamentoAberta(false);setAdminCancelamentoPin("");
+    setCancelamentoVenda(null);setCancelamentoItens([]);setCancelamentoPagamentos([]);setCancelamentoMotivo("");setAutorizacaoCancelamentoAberta(false);setCancelamentoAutorizado(false);setAdminCancelamentoPin("");
     try{
       const [vendaAtual,itens,pagamentosVenda]=await Promise.all([
         supabase.from("vendas").select("*").eq("id",String(venda.id)).eq("empresa_id",empresaId).single(),
@@ -243,12 +259,13 @@ export default function PDV() {
       setCancelamentoVenda(vendaAtual.data as Record<string,unknown>);
       setCancelamentoItens((itens.data||[]) as Record<string,unknown>[]);
       setCancelamentoPagamentos((pagamentosVenda.data||[]) as Record<string,unknown>[]);
+      if(operacaoTroca==="cancelamento"&&String(vendaAtual.data.situacao)==="concluida"){setCancelamentoErro("");setAutorizacaoCancelamentoAberta(true);}
       if(operacaoTroca==="troca")void carregarSaldoTroca(vendaAtual.data as Record<string,unknown>);
     }catch(e){setCancelamentoErro(e instanceof Error?e.message:"Falha ao carregar a venda.");}
     finally{setCancelamentoCarregando(false);}
   }
   async function confirmarCancelamentoVenda(){
-    if(!supabase||!cancelamentoVenda||cancelamentoSalvando||cancelamentoMotivo.trim().length<5||!adminCancelamentoId||adminCancelamentoPin.length<3||String(cancelamentoVenda.situacao)!=="concluida")return;
+    if(!supabase||!cancelamentoVenda||cancelamentoSalvando||cancelamentoMotivo.trim().length<5||!cancelamentoAutorizado||!adminCancelamentoId||adminCancelamentoPin.length<3||String(cancelamentoVenda.situacao)!=="concluida")return;
     const numero=String(cancelamentoVenda.numero);
     if(!window.confirm(`ATENÇÃO: cancelar definitivamente a venda #${numero}?\nOs produtos retornarão ao estoque e o estorno financeiro ficará pendente.\nEsta operação não poderá ser desfeita.`))return;
     setCancelamentoSalvando(true);setCancelamentoErro("");
@@ -258,7 +275,7 @@ export default function PDV() {
       if(!data?.sucesso)throw new Error(data?.erro||"O banco não confirmou o cancelamento. Consulte a venda antes de tentar novamente.");
       setCancelamentoVenda(v=>v?{...v,situacao:"cancelada"}:null);
       setCancelamentoResultados(atuais=>atuais.map(v=>String(v.id)===String(cancelamentoVenda.id)?{...v,situacao:"cancelada"}:v));
-      setCancelamentoSucesso(`Venda #${numero} cancelada. Estoque devolvido; estorno financeiro pendente.`);setAutorizacaoCancelamentoAberta(false);
+      setCancelamentoSucesso(`Venda #${numero} cancelada. Estoque devolvido; estorno financeiro pendente.`);setAutorizacaoCancelamentoAberta(false);setCancelamentoAutorizado(false);
       setHistoricoVendas(atuais=>atuais.map(v=>String(v.id)===String(cancelamentoVenda.id)?{...v,situacao:"cancelada"}:v));
       // Os produtos exibidos na tela de venda devem ser recarregados do banco.
       if(empresaId){const consulta=await supabase.from("produtos").select("id,codigo,descricao,codigo_barras,preco_custo,preco_venda,estoque_atual,ativo").eq("empresa_id",empresaId).eq("ativo",true).order("descricao").limit(1000);if(!consulta.error)setProdutos((consulta.data||[]) as Produto[]);}
@@ -1203,7 +1220,7 @@ export default function PDV() {
           {cancelamentoResultados.map(v=>{const t=cancelamentoTurnos.find(t=>String(t.id)===String(v.caixa_turno_id));return <tr key={String(v.id)}><td>#{historicoNumero(v)}</td><td>{historicoHorario(v)}</td><td>{t?`Turno ${String(t.numero||"—")}`:"—"}</td><td>{dinheiro(historicoValor(v,"total"))}</td><td>{formaCancelamento(v)}</td><td>{String(v.situacao)==="concluida"?"Concluída":"Cancelada"}</td><td><button type="button" onClick={()=>void selecionarVendaCancelamento(v)} disabled={cancelamentoCarregando||cancelamentoSalvando||trocaSalvando||String(v.situacao)!=="concluida"} style={{background:String(v.situacao)==="concluida"?"#b42318":"#cbd5e1",color:"#fff",border:"1px solid #9f1d16",borderRadius:8,padding:"9px 14px",fontWeight:700,cursor:String(v.situacao)==="concluida"?"pointer":"not-allowed"}} aria-label={`Cancelar venda número ${historicoNumero(v)}`}>{String(v.situacao)==="concluida"?"Cancelar":"Cancelada"}</button></td></tr>;})}
           </tbody></table></div>:<p className="ev-hist-aviso">Nenhuma venda encontrada com esses filtros.</p>}
         </div>}
-        {cancelamentoVenda&&<button type="button" className="ev-canc-voltar" disabled={cancelamentoSalvando||trocaSalvando} onClick={()=>{setCancelamentoVenda(null);setCancelamentoMotivo("");setCancelamentoSucesso("");setCancelamentoErro("");resetarTroca();}}>← Voltar aos resultados</button>}
+        {cancelamentoVenda&&<button type="button" className="ev-canc-voltar" disabled={cancelamentoSalvando||trocaSalvando} onClick={()=>{setCancelamentoVenda(null);setCancelamentoMotivo("");setCancelamentoSucesso("");setCancelamentoErro("");setCancelamentoAutorizado(false);setAdminCancelamentoPin("");setAutorizacaoCancelamentoAberta(false);resetarTroca();}}>← Voltar aos resultados</button>}
         {cancelamentoErro&&<p className="ev-hist-erro" role="alert">{cancelamentoErro}</p>}
         {cancelamentoSucesso&&<p className="ev-canc-sucesso" role="status">{cancelamentoSucesso}</p>}
         {cancelamentoVenda&&<div className="ev-canc-resultado">
@@ -1235,15 +1252,15 @@ export default function PDV() {
           {operacaoTroca==="cancelamento"&&String(cancelamentoVenda.situacao)==="concluida"&&!cancelamentoSucesso?<>
             <label className="ev-canc-motivo" htmlFor="ev-canc-motivo">Motivo do cancelamento (obrigatório)<textarea id="ev-canc-motivo" rows={3} maxLength={1000} value={cancelamentoMotivo} onChange={e=>setCancelamentoMotivo(e.target.value)} placeholder="Descreva o motivo com pelo menos 5 caracteres" disabled={cancelamentoSalvando}/></label>
             <p className="ev-hist-aviso">O cancelamento é definitivo. Os produtos retornam automaticamente ao estoque; o estorno financeiro será registrado como pendente, sem devolver dinheiro automaticamente.</p>
-            <div className="ev-canc-rodape"><button type="button" className="ev-canc-confirmar" disabled={cancelamentoSalvando||cancelamentoMotivo.trim().length<5||!cancelamentoItens.length} onClick={()=>{setCancelamentoErro("");setAdminCancelamentoPin("");setMostrarPinCancelamento(false);setAutorizacaoCancelamentoAberta(true);}}>{cancelamentoSalvando?"Cancelando...":"Confirmar cancelamento"}</button></div>
+            <div className="ev-canc-rodape"><button type="button" className="ev-canc-confirmar" disabled={cancelamentoSalvando||cancelamentoMotivo.trim().length<5||!cancelamentoItens.length||!cancelamentoAutorizado} onClick={()=>void confirmarCancelamentoVenda()}>{cancelamentoSalvando?"Cancelando...":"Confirmar cancelamento"}</button></div>
           </>:operacaoTroca==="cancelamento"?<p className="ev-hist-aviso">Esta venda não pode ser cancelada novamente.</p>:null}
           {autorizacaoCancelamentoAberta&&operacaoTroca==="cancelamento"&&String(cancelamentoVenda.situacao)==="concluida"&&<div role="presentation" style={{position:"fixed",inset:0,zIndex:9999,display:"grid",placeItems:"center",background:"#071a35a8",padding:16}}><section role="dialog" aria-modal="true" aria-label="Autorização de cancelamento" style={{width:"min(480px,100%)",background:"#fff",borderRadius:16,overflow:"hidden",boxShadow:"0 24px 70px #071a3550"}}>
-            <header style={{background:"#102c58",color:"white",padding:"18px 22px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12}}><h3 style={{margin:0,fontSize:19,color:"white"}}>Autorização de cancelamento</h3><button type="button" disabled={cancelamentoSalvando} onClick={()=>{setAutorizacaoCancelamentoAberta(false);setAdminCancelamentoPin("");}} aria-label="Fechar autorização" style={{background:"transparent",color:"white",border:"1px solid #ffffff70",borderRadius:8,padding:"6px 10px",cursor:"pointer"}}>✕</button></header>
+            <header style={{background:"#102c58",color:"white",padding:"18px 22px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12}}><h3 style={{margin:0,fontSize:19,color:"white"}}>Autorização de cancelamento</h3><button type="button" disabled={cancelamentoSalvando} onClick={()=>{setAutorizacaoCancelamentoAberta(false);setCancelamentoVenda(null);setCancelamentoAutorizado(false);setAdminCancelamentoPin("");}} aria-label="Fechar autorização" style={{background:"transparent",color:"white",border:"1px solid #ffffff70",borderRadius:8,padding:"6px 10px",cursor:"pointer"}}>✕</button></header>
             <div style={{padding:22,display:"grid",gap:15}}><p style={{margin:0,color:"#334155"}}>Para cancelar a venda #{String(cancelamentoVenda.numero)}, informe as credenciais de um administrador.</p>
               <label style={{display:"grid",gap:7,fontWeight:600,color:"#102c58"}}>Administrador<select value={adminCancelamentoId} onChange={e=>setAdminCancelamentoId(e.target.value)} disabled={cancelamentoSalvando} style={{width:"100%",padding:12,border:"1px solid #cbd5e1",borderRadius:10,background:"white"}}><option value="">Selecione um administrador</option>{adminsCancelamento.map(a=><option key={a.id} value={a.id}>{a.nome}</option>)}</select></label>
               <label style={{display:"grid",gap:7,fontWeight:600,color:"#102c58"}}>PIN do administrador<div style={{display:"flex",gap:8}}><input type={mostrarPinCancelamento?"text":"password"} autoComplete="off" value={adminCancelamentoPin} onChange={e=>setAdminCancelamentoPin(e.target.value)} disabled={cancelamentoSalvando} placeholder="PIN individual" style={{flex:1,minWidth:0,padding:12,border:"1px solid #cbd5e1",borderRadius:10}}/><button type="button" onClick={()=>setMostrarPinCancelamento(v=>!v)} aria-label={mostrarPinCancelamento?"Ocultar PIN":"Mostrar PIN"} style={{background:"#f1f5f9",border:"1px solid #cbd5e1",borderRadius:10,padding:"0 12px",cursor:"pointer"}}>{mostrarPinCancelamento?"Ocultar":"👁 Mostrar"}</button></div></label>
               {cancelamentoErro&&<p role="alert" style={{color:"#b42318",margin:0}}>{cancelamentoErro}</p>}
-              <div style={{display:"flex",justifyContent:"flex-end",gap:10,flexWrap:"wrap"}}><button type="button" disabled={cancelamentoSalvando} onClick={()=>{setAutorizacaoCancelamentoAberta(false);setAdminCancelamentoPin("");setCancelamentoErro("");}} style={{padding:"11px 15px",borderRadius:10,border:"1px solid #cbd5e1",background:"white",cursor:"pointer"}}>Voltar</button><button type="button" disabled={cancelamentoSalvando||!adminCancelamentoId||adminCancelamentoPin.length<3} onClick={()=>void confirmarCancelamentoVenda()} style={{padding:"11px 15px",borderRadius:10,border:0,background:"#b42318",color:"white",fontWeight:700,cursor:"pointer"}}>{cancelamentoSalvando?"Cancelando...":"Autorizar cancelamento"}</button></div>
+              <div style={{display:"flex",justifyContent:"flex-end",gap:10,flexWrap:"wrap"}}><button type="button" disabled={cancelamentoSalvando} onClick={()=>{setAutorizacaoCancelamentoAberta(false);setCancelamentoVenda(null);setCancelamentoAutorizado(false);setAdminCancelamentoPin("");setCancelamentoErro("");}} style={{padding:"11px 15px",borderRadius:10,border:"1px solid #cbd5e1",background:"white",cursor:"pointer"}}>Voltar</button><button type="button" disabled={cancelamentoSalvando||validandoAdminCancelamento||!adminCancelamentoId||adminCancelamentoPin.length<3} onClick={()=>void validarAdministradorCancelamento()} style={{padding:"11px 15px",borderRadius:10,border:0,background:"#b42318",color:"white",fontWeight:700,cursor:"pointer"}}>{validandoAdminCancelamento?"Validando...":"Validar administrador"}</button></div>
             </div></section></div>}
         </div>}
       </div>
@@ -1352,7 +1369,7 @@ export default function PDV() {
           {cancelamentoResultados.map(v=>{const t=cancelamentoTurnos.find(t=>String(t.id)===String(v.caixa_turno_id));return <tr key={String(v.id)}><td>#{historicoNumero(v)}</td><td>{historicoHorario(v)}</td><td>{t?`Turno ${String(t.numero||"—")}`:"—"}</td><td>{dinheiro(historicoValor(v,"total"))}</td><td>{formaCancelamento(v)}</td><td>{String(v.situacao)==="concluida"?"Concluída":"Cancelada"}</td><td><button type="button" onClick={()=>void selecionarVendaCancelamento(v)} disabled={cancelamentoCarregando||cancelamentoSalvando||trocaSalvando||String(v.situacao)!=="concluida"} style={{background:String(v.situacao)==="concluida"?"#b42318":"#cbd5e1",color:"#fff",border:"1px solid #9f1d16",borderRadius:8,padding:"9px 14px",fontWeight:700,cursor:String(v.situacao)==="concluida"?"pointer":"not-allowed"}} aria-label={`Cancelar venda número ${historicoNumero(v)}`}>{String(v.situacao)==="concluida"?"Cancelar":"Cancelada"}</button></td></tr>;})}
           </tbody></table></div>:<p className="ev-hist-aviso">Nenhuma venda encontrada com esses filtros.</p>}
         </div>}
-        {cancelamentoVenda&&<button type="button" className="ev-canc-voltar" disabled={cancelamentoSalvando||trocaSalvando} onClick={()=>{setCancelamentoVenda(null);setCancelamentoMotivo("");setCancelamentoSucesso("");setCancelamentoErro("");resetarTroca();}}>← Voltar aos resultados</button>}
+        {cancelamentoVenda&&<button type="button" className="ev-canc-voltar" disabled={cancelamentoSalvando||trocaSalvando} onClick={()=>{setCancelamentoVenda(null);setCancelamentoMotivo("");setCancelamentoSucesso("");setCancelamentoErro("");setCancelamentoAutorizado(false);setAdminCancelamentoPin("");setAutorizacaoCancelamentoAberta(false);resetarTroca();}}>← Voltar aos resultados</button>}
         {cancelamentoErro&&<p className="ev-hist-erro" role="alert">{cancelamentoErro}</p>}
         {cancelamentoSucesso&&<p className="ev-canc-sucesso" role="status">{cancelamentoSucesso}</p>}
         {cancelamentoVenda&&<div className="ev-canc-resultado">
@@ -1384,15 +1401,15 @@ export default function PDV() {
           {operacaoTroca==="cancelamento"&&String(cancelamentoVenda.situacao)==="concluida"&&!cancelamentoSucesso?<>
             <label className="ev-canc-motivo" htmlFor="ev-canc-motivo">Motivo do cancelamento (obrigatório)<textarea id="ev-canc-motivo" rows={3} maxLength={1000} value={cancelamentoMotivo} onChange={e=>setCancelamentoMotivo(e.target.value)} placeholder="Descreva o motivo com pelo menos 5 caracteres" disabled={cancelamentoSalvando}/></label>
             <p className="ev-hist-aviso">O cancelamento é definitivo. Os produtos retornam automaticamente ao estoque; o estorno financeiro será registrado como pendente, sem devolver dinheiro automaticamente.</p>
-            <div className="ev-canc-rodape"><button type="button" className="ev-canc-confirmar" disabled={cancelamentoSalvando||cancelamentoMotivo.trim().length<5||!cancelamentoItens.length} onClick={()=>{setCancelamentoErro("");setAdminCancelamentoPin("");setMostrarPinCancelamento(false);setAutorizacaoCancelamentoAberta(true);}}>{cancelamentoSalvando?"Cancelando...":"Confirmar cancelamento"}</button></div>
+            <div className="ev-canc-rodape"><button type="button" className="ev-canc-confirmar" disabled={cancelamentoSalvando||cancelamentoMotivo.trim().length<5||!cancelamentoItens.length||!cancelamentoAutorizado} onClick={()=>void confirmarCancelamentoVenda()}>{cancelamentoSalvando?"Cancelando...":"Confirmar cancelamento"}</button></div>
           </>:operacaoTroca==="cancelamento"?<p className="ev-hist-aviso">Esta venda não pode ser cancelada novamente.</p>:null}
           {autorizacaoCancelamentoAberta&&operacaoTroca==="cancelamento"&&String(cancelamentoVenda.situacao)==="concluida"&&<div role="presentation" style={{position:"fixed",inset:0,zIndex:9999,display:"grid",placeItems:"center",background:"#071a35a8",padding:16}}><section role="dialog" aria-modal="true" aria-label="Autorização de cancelamento" style={{width:"min(480px,100%)",background:"#fff",borderRadius:16,overflow:"hidden",boxShadow:"0 24px 70px #071a3550"}}>
-            <header style={{background:"#102c58",color:"white",padding:"18px 22px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12}}><h3 style={{margin:0,fontSize:19,color:"white"}}>Autorização de cancelamento</h3><button type="button" disabled={cancelamentoSalvando} onClick={()=>{setAutorizacaoCancelamentoAberta(false);setAdminCancelamentoPin("");}} aria-label="Fechar autorização" style={{background:"transparent",color:"white",border:"1px solid #ffffff70",borderRadius:8,padding:"6px 10px",cursor:"pointer"}}>✕</button></header>
+            <header style={{background:"#102c58",color:"white",padding:"18px 22px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12}}><h3 style={{margin:0,fontSize:19,color:"white"}}>Autorização de cancelamento</h3><button type="button" disabled={cancelamentoSalvando} onClick={()=>{setAutorizacaoCancelamentoAberta(false);setCancelamentoVenda(null);setCancelamentoAutorizado(false);setAdminCancelamentoPin("");}} aria-label="Fechar autorização" style={{background:"transparent",color:"white",border:"1px solid #ffffff70",borderRadius:8,padding:"6px 10px",cursor:"pointer"}}>✕</button></header>
             <div style={{padding:22,display:"grid",gap:15}}><p style={{margin:0,color:"#334155"}}>Para cancelar a venda #{String(cancelamentoVenda.numero)}, informe as credenciais de um administrador.</p>
               <label style={{display:"grid",gap:7,fontWeight:600,color:"#102c58"}}>Administrador<select value={adminCancelamentoId} onChange={e=>setAdminCancelamentoId(e.target.value)} disabled={cancelamentoSalvando} style={{width:"100%",padding:12,border:"1px solid #cbd5e1",borderRadius:10,background:"white"}}><option value="">Selecione um administrador</option>{adminsCancelamento.map(a=><option key={a.id} value={a.id}>{a.nome}</option>)}</select></label>
               <label style={{display:"grid",gap:7,fontWeight:600,color:"#102c58"}}>PIN do administrador<div style={{display:"flex",gap:8}}><input type={mostrarPinCancelamento?"text":"password"} autoComplete="off" value={adminCancelamentoPin} onChange={e=>setAdminCancelamentoPin(e.target.value)} disabled={cancelamentoSalvando} placeholder="PIN individual" style={{flex:1,minWidth:0,padding:12,border:"1px solid #cbd5e1",borderRadius:10}}/><button type="button" onClick={()=>setMostrarPinCancelamento(v=>!v)} aria-label={mostrarPinCancelamento?"Ocultar PIN":"Mostrar PIN"} style={{background:"#f1f5f9",border:"1px solid #cbd5e1",borderRadius:10,padding:"0 12px",cursor:"pointer"}}>{mostrarPinCancelamento?"Ocultar":"👁 Mostrar"}</button></div></label>
               {cancelamentoErro&&<p role="alert" style={{color:"#b42318",margin:0}}>{cancelamentoErro}</p>}
-              <div style={{display:"flex",justifyContent:"flex-end",gap:10,flexWrap:"wrap"}}><button type="button" disabled={cancelamentoSalvando} onClick={()=>{setAutorizacaoCancelamentoAberta(false);setAdminCancelamentoPin("");setCancelamentoErro("");}} style={{padding:"11px 15px",borderRadius:10,border:"1px solid #cbd5e1",background:"white",cursor:"pointer"}}>Voltar</button><button type="button" disabled={cancelamentoSalvando||!adminCancelamentoId||adminCancelamentoPin.length<3} onClick={()=>void confirmarCancelamentoVenda()} style={{padding:"11px 15px",borderRadius:10,border:0,background:"#b42318",color:"white",fontWeight:700,cursor:"pointer"}}>{cancelamentoSalvando?"Cancelando...":"Autorizar cancelamento"}</button></div>
+              <div style={{display:"flex",justifyContent:"flex-end",gap:10,flexWrap:"wrap"}}><button type="button" disabled={cancelamentoSalvando} onClick={()=>{setAutorizacaoCancelamentoAberta(false);setCancelamentoVenda(null);setCancelamentoAutorizado(false);setAdminCancelamentoPin("");setCancelamentoErro("");}} style={{padding:"11px 15px",borderRadius:10,border:"1px solid #cbd5e1",background:"white",cursor:"pointer"}}>Voltar</button><button type="button" disabled={cancelamentoSalvando||validandoAdminCancelamento||!adminCancelamentoId||adminCancelamentoPin.length<3} onClick={()=>void validarAdministradorCancelamento()} style={{padding:"11px 15px",borderRadius:10,border:0,background:"#b42318",color:"white",fontWeight:700,cursor:"pointer"}}>{validandoAdminCancelamento?"Validando...":"Validar administrador"}</button></div>
             </div></section></div>}
         </div>}
       </div>
