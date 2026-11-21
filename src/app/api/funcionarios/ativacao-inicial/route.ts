@@ -19,8 +19,12 @@ export async function POST(req:NextRequest){
   });
   if(error){
    if(error.message?.includes('JÁ_INICIALIZADA'))return NextResponse.json({error:'A empresa já possui funcionários. Entre com um administrador existente.'},{status:409});
-   return NextResponse.json({error:'Não foi possível ativar o administrador inicial',codigo:error.code},{status:500});
+   console.error('EVOLUX_ATIVACAO_INICIAL_RPC', {code:error.code, message:error.message, hint:error.hint});
+   return NextResponse.json({error:'Não foi possível ativar o administrador inicial',codigo:error.code||'ERRO_RPC'},{status:500});
   }
   return NextResponse.json({ok:true,id:data});
- }catch{return NextResponse.json({error:'Falha ao ativar administrador'},{status:500});}
+ }catch(e){
+  console.error('EVOLUX_ATIVACAO_INICIAL_EXCECAO', {message:e instanceof Error?e.message:'Erro desconhecido'});
+  return NextResponse.json({error:'Falha ao ativar administrador'},{status:500});
+ }
 }
