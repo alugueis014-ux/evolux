@@ -24,3 +24,34 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* EVOLUX — padrão visual de janelas (sem alterar lógica de negócio) */
+.ev-product-modal,.ev-form-modal,.ev-caixa-window,.ev-cli-modal,.ev-cli-form-modal,.ev-supplier-modal,.ev-supplier-form-modal,.ev-xml-modal,.ev-ne-modal,.ev-rapida-modal,[role="dialog"]{border-radius:16px!important;overflow:hidden}
+.ev-product-heading,.ev-cli-header,.ev-supplier-head,.ev-xml-head,.ev-ne-modal>header,.ev-rapida-titulo,.ev-caixa-heading{background:#0b2454!important;color:#fff!important;border-bottom:0!important;flex-shrink:0}
+.ev-product-heading h2,.ev-cli-header h2,.ev-supplier-head h2,.ev-xml-head h2,.ev-ne-modal>header h2,.ev-caixa-heading h2,.ev-product-heading svg{color:#fff!important}
+.ev-product-heading p,.ev-cli-header p,.ev-supplier-head p,.ev-xml-head p,.ev-ne-modal>header p,.ev-caixa-heading p{color:#dce7fa!important}
+.ev-product-heading button,.ev-cli-header button,.ev-supplier-head button,.ev-xml-head button,.ev-ne-modal>header button,.ev-caixa-heading button,.ev-rapida-titulo button{color:#fff!important;background:#ffffff17!important;border:1px solid #ffffff30!important;border-radius:9px!important;cursor:pointer}
+.ev-product-heading button:hover,.ev-cli-header button:hover,.ev-supplier-head button:hover,.ev-xml-head button:hover,.ev-ne-modal>header button:hover,.ev-caixa-heading button:hover{background:#ffffff30!important}
+.ev-product-modal input:not([type="checkbox"]),.ev-form-modal input:not([type="checkbox"]),.ev-cli-modal input,.ev-cli-form-modal input,.ev-supplier-modal input,.ev-supplier-form-modal input,.ev-xml-modal input,.ev-caixa-window input,.ev-ne-modal input{border-radius:9px!important}
+.ev-product-actions button,.ev-cli-footer button,.ev-supplier-footer button,.ev-xml-footer button,.ev-ne-modal button{border-radius:9px!important}
+.ev-product-table-wrap,.ev-cli-table,.ev-supplier-table,.ev-xml-table{border-radius:10px!important}
+
+
+/* EVOLUX 24.7.8: cabeçalhos e cantos padronizados — prioridade explícita */
+.ev-dashboard .ev-product-modal,.ev-dashboard .ev-form-modal,.ev-dashboard .ev-caixa-window,.ev-dashboard .ev-empresa-window,
+.ev-cli-modal,.ev-cli-form-modal,.ev-supplier-modal,.ev-supplier-form-modal,.ev-xml-modal,.ev-ne-modal,.ev-pdv-cadastro,
+.ev-rapida-modal,.ev-caixa .modal{border-radius:16px!important;overflow:hidden!important;box-shadow:0 22px 65px rgba(5,20,48,.22)}
+.ev-dashboard .ev-product-heading,.ev-dashboard .ev-caixa-heading,
+.ev-cli-header,.ev-supplier-head,.ev-xml-head,.ev-ne-modal>header,.ev-pdv-cadastro>header,
+.company-modal-head,.ev-rapida-titulo{background:#0b2454!important;background-image:none!important;color:#fff!important;border-bottom:0!important;}
+.ev-dashboard .ev-product-heading h2,.ev-dashboard .ev-product-heading h2 svg,.ev-dashboard .ev-caixa-heading h2,
+.ev-cli-header h2,.ev-supplier-head h2,.ev-xml-head h2,.ev-ne-modal>header h2,.ev-pdv-cadastro>header h2,
+.company-modal-head strong,.ev-rapida-titulo h2{color:#fff!important}
+.ev-dashboard .ev-product-heading p,.ev-dashboard .ev-caixa-heading p,.ev-cli-header p,.ev-supplier-head p,.ev-xml-head p,.ev-ne-modal>header p,.ev-pdv-cadastro>header p{color:#dce7fa!important}
+.ev-dashboard .ev-product-heading button,.ev-dashboard .ev-caixa-heading button,
+.ev-cli-header button,.ev-supplier-head button,.ev-xml-head button,.ev-ne-modal>header button,.ev-pdv-cadastro>header button,
+.company-modal-head button,.ev-rapida-titulo button{background:#ffffff1c!important;color:#fff!important;border:1px solid #ffffff44!important;border-radius:9px!important}
+.ev-dashboard .ev-product-modal input,.ev-dashboard .ev-form-modal input,.ev-dashboard .ev-empresa-window input,
+.ev-cli-modal input,.ev-cli-form-modal input,.ev-supplier-modal input,.ev-supplier-form-modal input,.ev-xml-modal input,.ev-ne-modal input,
+.ev-pdv-cadastro input,.ev-pdv-cadastro select{border-radius:9px!important}
+.ev-dashboard .ev-product-actions button,.ev-cli-footer button,.ev-supplier-footer button,.ev-xml-footer button,.ev-ne-modal footer button,.ev-pdv-cadastro footer button{border-radius:9px!important}

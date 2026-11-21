@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Símbolo EVOLUX">
+<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#23d5ff"/><stop offset=".5" stop-color="#0789f9"/><stop offset="1" stop-color="#0454c7"/></linearGradient></defs>
+<path fill="url(#g)" d="M25 28C39 12 70 11 110 14L100 39H57L48 55H97L86 77H37L28 94H91L78 116H15C8 116 5 109 9 102L37 49H19Z"/>
+<path fill="#fff" d="M17 83C29 64 54 50 88 45L81 57C54 63 31 76 17 95Z"/>
+</svg>
