@@ -1,4 +1,5 @@
 "use client";
+import RecuperacoesPainel from "./RecuperacoesPainel";
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
@@ -375,9 +376,11 @@ export default function Dashboard() {
         <div className="ev-brand"><img src="/evolux-logo.svg" alt="" width="39" height="39"/><strong>EVOLU<span>X</span></strong><i/><span className="ev-brand-sub">Gestão Empresarial</span></div>
         <div className="ev-company" title={nome || "Empresa"}><Icon name="home" size={20}/><span>{loading ? "Carregando empresa..." : nome || "Empresa"}</span></div>
         <div className="ev-user"><Icon name="users" size={20}/><span>{usuario || "Usuário"}<small>Conta autenticada</small></span></div>
+        <button className="ev-top-exit" type="button" onClick={()=>{sessionStorage.removeItem('evolux_funcionario_validado');sessionStorage.removeItem('evolux_empresa_selecionada');window.location.assign('/selecionar-usuario')}}>Trocar usuário</button>
         <button className="ev-top-exit" type="button" onClick={sair} disabled={saindo}><Icon name="logout" size={19}/>{saindo ? "Saindo..." : "Sair"}</button>
       </div>
     </header>
+    {empresaId && <RecuperacoesPainel empresaId={empresaId} />}
     <nav className="ev-tabs" aria-label="Menu superior">
       <div className="ev-cadastros-anchor">
         <button type="button" className={aba==="Cadastros"?"active":""} aria-expanded={cadastrosMenuAberto} aria-haspopup="menu" onClick={()=>{setAba("Cadastros");setAviso("");setCadastrosMenuAberto(v=>!v)}}>Cadastros <span aria-hidden="true">▾</span></button>
