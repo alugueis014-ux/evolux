@@ -7,9 +7,10 @@ export async function GET(req:NextRequest){
  const auth=createClient(url,pub,{auth:{persistSession:false,autoRefreshToken:false}}),admin=createClient(url,secret,{auth:{persistSession:false,autoRefreshToken:false}});
  const {data:{user},error}=await auth.auth.getUser(token);if(error||!user)return NextResponse.json({error:'Sessão inválida'},{status:401});
  const {data:links,error:linkError}=await admin.from('empresa_usuarios').select('empresa_id,papel').eq('usuario_id',user.id);
- if(linkError||!links?.length)return NextResponse.json({error:'Empresa não encontrada'},{status:403});
+ if(linkError)return NextResponse.json({error:'Falha ao consultar vínculo da empresa',codigo:'ERRO_CONSULTA_VINCULO'},{status:500});
+ if(!links?.length)return NextResponse.json({error:'Esta conta não possui vínculo com uma empresa. É necessário corrigir o vínculo no Supabase antes de selecionar funcionários.',codigo:'CONTA_SEM_EMPRESA'},{status:403});
  const empresaId=req.nextUrl.searchParams.get('empresaId')||links[0].empresa_id;
- if(!links.some(l=>l.empresa_id===empresaId))return NextResponse.json({error:'Sem acesso à empresa'},{status:403});
+ if(!links.some(l=>l.empresa_id===empresaId))return NextResponse.json({error:'A conta não tem acesso à empresa selecionada',codigo:'EMPRESA_NAO_AUTORIZADA'},{status:403});
  const {data:profiles,error:profileError}=await admin.from('evolux_usuarios_acesso').select('usuario_id,nome,usuario,ativo').eq('empresa_id',empresaId).eq('ativo',true);
  if(profileError)return NextResponse.json({error:'Migração de usuários não configurada'},{status:503});
  const {data:members,error:memberError}=await admin.from('empresa_usuarios').select('usuario_id,papel').eq('empresa_id',empresaId);
