@@ -7,6 +7,7 @@ import FornecedoresModal from "./FornecedoresModal";
 import ImportarXmlModal from "./ImportarXmlModal";
 import NotasEntradaModal from "./NotasEntradaModal";
 import ClientesModal from "./ClientesModal";
+import DespesasModal from "./DespesasModal";
 import CaixaGestao from "./caixa/page";
 import CompletarCadastro from "../completar-cadastro/page";
 import GradeProduto from "./GradeProduto";
@@ -69,6 +70,7 @@ export default function Dashboard() {
   const [caixaAberto,setCaixaAberto] = useState(false);
   const [empresaAberta,setEmpresaAberta] = useState(false);
   const [fornecedoresAberto, setFornecedoresAberto] = useState(false);
+  const [despesasAberto, setDespesasAberto] = useState(false);
   const [importacaoXmlAberta, setImportacaoXmlAberta] = useState(false);
   const [notasEntradaAbertas, setNotasEntradaAbertas] = useState(false);
   const [menuNotasAberto,setMenuNotasAberto]=useState(false);
@@ -91,7 +93,7 @@ export default function Dashboard() {
   const [abaProduto, setAbaProduto] = useState<"dados" | "grade" | "fornecedores">("dados");
 
   // Apenas um cadastro principal por vez; preserva sub-janelas do cadastro ativo.
-  function abrirJanela(tipo: "produtos"|"clientes"|"fornecedores"|"empresa"|"caixa"|"notas"|"xml"|"entradas") {
+  function abrirJanela(tipo: "produtos"|"clientes"|"fornecedores"|"empresa"|"caixa"|"notas"|"xml"|"entradas"|"despesas") {
     if (cadastroAberto || historicoAberto) {
       if (!window.confirm("Existe uma janela de produto em edição ou consulta. Deseja fechá-la para abrir outra função? Alterações não salvas poderão ser perdidas.")) return;
     }
@@ -100,6 +102,7 @@ export default function Dashboard() {
     setProdutosAberto(false);
     setClientesAberto(false);
     setFornecedoresAberto(false);
+    setDespesasAberto(false);
     setEmpresaAberta(false);
     setCaixaAberto(false);
     setMenuNotasAberto(false);
@@ -110,6 +113,7 @@ export default function Dashboard() {
     if (tipo === "produtos") { setPesquisaProduto(""); setProdutosAberto(true); }
     else if (tipo === "clientes") setClientesAberto(true);
     else if (tipo === "fornecedores") setFornecedoresAberto(true);
+    else if (tipo === "despesas") setDespesasAberto(true);
     else if (tipo === "empresa") setEmpresaAberta(true);
     else if (tipo === "caixa") setCaixaAberto(true);
     else if (tipo === "notas") setMenuNotasAberto(true);
@@ -117,7 +121,7 @@ export default function Dashboard() {
     else if (tipo === "entradas") setNotasEntradaAbertas(true);
   }
   function abrirCadastroMenu(acao: string) {
-    if (acao === "produtos" || acao === "clientes" || acao === "fornecedores" || acao === "empresa") abrirJanela(acao);
+    if (acao === "produtos" || acao === "clientes" || acao === "fornecedores" || acao === "empresa" || acao === "despesas") abrirJanela(acao);
     else { setCadastrosMenuAberto(false); setAviso(acao === "pagamentos" ? "Cadastro de formas de pagamento: funcionalidade ainda em desenvolvimento." : "Cadastro de usuários e vendedores: funcionalidade ainda em desenvolvimento."); }
   }
 
@@ -138,7 +142,7 @@ export default function Dashboard() {
   useEffect(() => {
     function atalhosPainel(event: KeyboardEvent) {
       if (event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
-      if (empresaAberta || cadastrosMenuAberto || produtosAberto || clientesAberto || fornecedoresAberto || importacaoXmlAberta ||
+      if (empresaAberta || cadastrosMenuAberto || produtosAberto || clientesAberto || fornecedoresAberto || despesasAberto || importacaoXmlAberta ||
           notasEntradaAbertas || menuNotasAberto || cadastroAberto || historicoAberto || caixaAberto) return;
       const alvo = event.target as HTMLElement | null;
       if (alvo?.closest("input, textarea, select, [contenteditable='true']")) return;
@@ -159,7 +163,7 @@ export default function Dashboard() {
     }
     window.addEventListener("keydown", atalhosPainel);
     return () => window.removeEventListener("keydown", atalhosPainel);
-  }, [empresaAberta, cadastrosMenuAberto, produtosAberto, clientesAberto, fornecedoresAberto, importacaoXmlAberta,
+  }, [empresaAberta, cadastrosMenuAberto, produtosAberto, clientesAberto, fornecedoresAberto, despesasAberto, importacaoXmlAberta,
       notasEntradaAbertas, menuNotasAberto, cadastroAberto, historicoAberto, caixaAberto]);
 
   useEffect(()=>{
@@ -370,7 +374,7 @@ export default function Dashboard() {
       <div className="ev-cadastros-anchor">
         <button type="button" className={aba==="Cadastros"?"active":""} aria-expanded={cadastrosMenuAberto} aria-haspopup="menu" onClick={()=>{setAba("Cadastros");setAviso("");setCadastrosMenuAberto(v=>!v)}}>Cadastros <span aria-hidden="true">▾</span></button>
         {cadastrosMenuAberto&&<div className="ev-cadastros-menu" role="menu" aria-label="Cadastros">
-          {([["produtos","Cadastro de produtos","▣"],["clientes","Cadastro de clientes","♙"],["fornecedores","Cadastro de fornecedores","▤"],["pagamentos","Cadastro de formas de pagamento","▦"],["usuarios","Cadastro de usuários e vendedores","♧"],["empresa","Cadastro de informações da empresa","⌂"]] as const).map(([acao,titulo,icone])=><button key={acao} type="button" role="menuitem" onClick={()=>abrirCadastroMenu(acao)}><span className="ev-cadastros-icone" aria-hidden="true">{icone}</span><span>{titulo}</span>{(acao==="pagamentos"||acao==="usuarios")&&<small>Em desenvolvimento</small>}</button>)}
+          {([["produtos","Cadastro de produtos","▣"],["clientes","Cadastro de clientes","♙"],["fornecedores","Cadastro de fornecedores","▤"],["pagamentos","Cadastro de formas de pagamento","▦"],["usuarios","Cadastro de usuários e vendedores","♧"],["empresa","Cadastro de informações da empresa","⌂"],["despesas","Cadastro de Despesas","▤"]] as const).map(([acao,titulo,icone])=><button key={acao} type="button" role="menuitem" onClick={()=>abrirCadastroMenu(acao)}><span className="ev-cadastros-icone" aria-hidden="true">{icone}</span><span>{titulo}</span>{(acao==="pagamentos"||acao==="usuarios")&&<small>Em desenvolvimento</small>}</button>)}
         </div>}
       </div>
       {["Lançamentos", "Relatórios", "Gráficos", "Utilitários", "Ajuda"].map(item => <button type="button" key={item} className={aba === item ? "active" : ""} onClick={() => { setCadastrosMenuAberto(false);setAba(item);setAviso(`A seção ${item} será implementada em uma próxima etapa.`); }}>{item}</button>)}
@@ -447,6 +451,7 @@ export default function Dashboard() {
     </div>}
     {clientesAberto && <ClientesModal empresaId={empresaId} onClose={()=>setClientesAberto(false)} />}
     {fornecedoresAberto && <FornecedoresModal empresaId={empresaId} onClose={() => setFornecedoresAberto(false)} />}
+    {despesasAberto && <DespesasModal empresaId={empresaId} onClose={() => setDespesasAberto(false)} />}
     {menuNotasAberto && <div className="ev-product-overlay" onMouseDown={e=>{if(e.target===e.currentTarget)setMenuNotasAberto(false)}}><section className="ev-notas-menu" role="dialog" aria-modal="true" aria-label="Notas fiscais"><div className="ev-notas-menu-head"><strong>Notas Fiscais</strong><button type="button" onClick={()=>setMenuNotasAberto(false)} aria-label="Fechar">×</button></div><p>Escolha o que deseja fazer.</p><button type="button" onClick={()=>{abrirJanela("xml")}}>Importar XML de entrada</button><button type="button" onClick={()=>{abrirJanela("entradas")}}>Consultar notas de entrada</button></section></div>}
     {notasEntradaAbertas && <NotasEntradaModal empresaId={empresaId} onClose={()=>setNotasEntradaAbertas(false)} />}
     {importacaoXmlAberta && <ImportarXmlModal onClose={() => setImportacaoXmlAberta(false)} />}
