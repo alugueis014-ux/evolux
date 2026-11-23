@@ -278,7 +278,9 @@ export default function PDV() {
       if(error)throw new Error("Não foi possível validar o PIN do administrador.");
       const resultado=Array.isArray(data)?data[0]:null;
       if(!resultado?.autorizado||resultado.perfil!=="administrador")throw new Error(resultado?.motivo||"Credenciais de administrador inválidas.");
-      await confirmarCancelamentoVenda(true);
+      setCancelamentoAutorizado(true);
+      setAutorizacaoCancelamentoAberta(false);
+      setCancelamentoErro("");
     }catch(e){setCancelamentoErro(e instanceof Error?e.message:"Autorização negada.");setAdminCancelamentoPin("");}
     finally{setValidandoAdminCancelamento(false);}
   }
@@ -355,7 +357,7 @@ export default function PDV() {
       setCancelamentoVenda(vendaAtual.data as Record<string,unknown>);
       setCancelamentoItens((itens.data||[]) as Record<string,unknown>[]);
       setCancelamentoPagamentos((pagamentosVenda.data||[]) as Record<string,unknown>[]);
-      if(operacaoTroca==="cancelamento"&&String(vendaAtual.data.situacao)==="concluida"){setCancelamentoErro("");setAutorizacaoCancelamentoAberta(false);}
+      if(operacaoTroca==="cancelamento"&&String(vendaAtual.data.situacao)==="concluida"){setCancelamentoErro("");setAutorizacaoCancelamentoAberta(true);}
       if(operacaoTroca==="troca")void carregarSaldoTroca(vendaAtual.data as Record<string,unknown>);
     }catch(e){setCancelamentoErro(e instanceof Error?e.message:"Falha ao carregar a venda.");}
     finally{setCancelamentoCarregando(false);}
@@ -499,6 +501,66 @@ export default function PDV() {
   const [historicoDetalheCarregando,setHistoricoDetalheCarregando] = useState(false);
   const [historicoDetalheErro,setHistoricoDetalheErro] = useState("");
   // Etapa 24.4.3.2: correção auditada de pagamentos via RPC segura.
+  const [pinAcao,setPinAcao]=useState<"apagar"|"pagamento"|"cancelar_lancamento"|null>(null);
+  const [pinAdmins,setPinAdmins]=useState<{id:string;nome:string}[]>([]);
+  const [pinAdminId,setPinAdminId]=useState("");
+  const [pinValor,setPinValor]=useState("");
+  const [pinErro,setPinErro]=useState("");
+  const [pinProcessando,setPinProcessando]=useState(false);
+  const [pinMostrar,setPinMostrar]=useState(false);
+  const [pinItemId,setPinItemId]=useState("");
+  const [pagamentoPendente,setPagamentoPendente]=useState<Record<string,unknown>|null>(null);
+  const [pagamentoCredencial,setPagamentoCredencial]=useState<{administrador:string;pin:string;vendaId:string}|null>(null);
+  async function pedirAutorizacao(acao:"apagar"|"pagamento"|"cancelar_lancamento",produtoId=""){
+    if(!supabase||!empresaId)return;
+    setPinAcao(acao);setPinItemId(produtoId);setPinValor("");setPinErro("");setPinAdmins([]);setPinAdminId("");setPinMostrar(false);
+    try{
+      const {data:{session}}=await supabase.auth.getSession();
+      if(!session)throw new Error("Sessão expirada.");
+      const resposta=await fetch("/api/funcionarios",{headers:{Authorization:`Bearer ${session.access_token}`},cache:"no-store"});
+      const dados=await resposta.json();
+      if(!resposta.ok)throw new Error(dados.error||"Não foi possível consultar administradores.");
+      const admins=(dados.usuarios||[]).filter((u:{papel:string;ativo:boolean})=>u.papel==="administrador"&&u.ativo);
+      if(!admins.length)throw new Error("Nenhum administrador ativo disponível.");
+      setPinAdmins(admins);setPinAdminId(admins[0].id);
+    }catch(e){setPinErro(e instanceof Error?e.message:"Falha ao consultar administradores.");}
+  }
+  async function confirmarAutorizacao(){
+    if(!supabase||!pinAcao||!pinAdminId||pinValor.length<3||pinProcessando)return;
+    setPinProcessando(true);setPinErro("");
+    try{
+      if(pinAcao==="apagar"||pinAcao==="cancelar_lancamento"){
+        const {data:{session}}=await supabase.auth.getSession();
+        if(!session)throw new Error("Sessão expirada.");
+        const resposta=await fetch("/api/autorizacao-admin",{
+          method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${session.access_token}`},
+          body:JSON.stringify({empresaId,administradorId:pinAdminId,pin:pinValor,operacao:pinAcao==="apagar"?"apagar_item":"cancelar_lancamento",produtoId:pinAcao==="apagar"?pinItemId:"carrinho"})
+        });
+        const dados=await resposta.json();
+        if(!resposta.ok||!dados.ok)throw new Error(dados.error||"Autorização negada.");
+        if(pinAcao==="apagar"){
+          setCarrinho(atual=>atual.filter(l=>l.produto.id!==pinItemId));
+          setItemSelecionado(null);
+        }else{
+          setCarrinho([]);setBusca("");setItemSelecionado(null);setProdutoPendente(null);setTelaVenda(false);
+        }
+      }else{
+        // Primeira etapa: validar PIN, sem alterar pagamentos.
+        if(!pagamentoPendente)throw new Error("Venda não selecionada.");
+        const {data:validacao,error:erroValidacao}=await supabase.rpc("evolux_verificar_pin_funcionario",{
+          p_empresa:empresaId,p_funcionario:pinAdminId,p_pin:pinValor
+        });
+        if(erroValidacao)throw new Error("Não foi possível validar o PIN.");
+        const resultado=Array.isArray(validacao)?validacao[0]:null;
+        if(!resultado?.autorizado||resultado.perfil!=="administrador")throw new Error(resultado?.motivo||"PIN de administrador inválido.");
+        setPagamentoCredencial({administrador:pinAdminId,pin:pinValor,vendaId:String(pagamentoPendente.id)});
+        await abrirCorrecao(pagamentoPendente);
+        setPagamentoPendente(null);
+      }
+      setPinAcao(null);setPinValor("");setPinAdminId("");
+    }catch(e){setPinErro(e instanceof Error?e.message:"Autorização negada.");setPinValor("");}
+    finally{setPinProcessando(false);}
+  }
   const [correcaoVenda,setCorrecaoVenda] = useState<Record<string,unknown>|null>(null);
   const [correcaoAtual,setCorrecaoAtual] = useState<Record<string,unknown>[]>([]);
   const [correcaoValores,setCorrecaoValores] = useState({dinheiro:"",pix:"",cartao:""});
@@ -539,29 +601,36 @@ export default function PDV() {
     setCorrecaoCarregando(false);
   }
   async function salvarCorrecao(){
-    if(!supabase||!correcaoValida||!correcaoVenda||correcaoErro)return;
-    const numero=String(historicoCampo(correcaoVenda,"numero","numero_venda")||"—");
-    if(!window.confirm(`Confirmar correção do pagamento da venda #${numero}?\nEsta ação será registrada na auditoria.`))return;
-    setCorrecaoSalvando(true);setCorrecaoErro("");setCorrecaoSucesso("");
+    if(!supabase||!correcaoValida||!correcaoVenda||correcaoErro||correcaoSalvando)return;
+    if(!pagamentoCredencial||pagamentoCredencial.vendaId!==String(correcaoVenda.id)){
+      setCorrecaoErro("Autorização expirada. Feche e solicite novamente.");return;
+    }
+    setCorrecaoSalvando(true);setCorrecaoErro("");
     try{
-      const {data,error}=await supabase.rpc("evolux_corrigir_pagamento",{
+      const {data,error}=await supabase.rpc("evolux_corrigir_pagamento_autorizado",{
         p_venda_id:String(correcaoVenda.id),
         p_pagamentos:{dinheiro:correcaoCentavos(correcaoValores.dinheiro)/100,pix:correcaoCentavos(correcaoValores.pix)/100,cartao:correcaoCentavos(correcaoValores.cartao)/100},
-        p_motivo:correcaoMotivo.trim()
+        p_motivo:correcaoMotivo.trim(),
+        p_administrador:pagamentoCredencial.administrador,
+        p_pin:pagamentoCredencial.pin
       });
+      setPagamentoCredencial(null);
       if(error)throw new Error(error.message);
-      if(!data?.sucesso)throw new Error("O servidor não confirmou a correção. Confira o histórico antes de tentar novamente.");
-      setCorrecaoSucesso("Pagamento corrigido e auditoria registrada com sucesso.");
+      if(!data?.sucesso)throw new Error(data?.erro||"O banco não confirmou a correção.");
+      setCorrecaoSucesso("Pagamento corrigido e auditado com autorização do administrador.");
       const {data:atualizados,error:erroLeitura}=await supabase.from("venda_pagamentos").select("id,forma,valor").eq("venda_id",String(correcaoVenda.id));
       if(!erroLeitura){
         setCorrecaoAtual((atualizados||[]) as Record<string,unknown>[]);
         setHistoricoPagamentosLista(atuais=>[...atuais.filter(p=>String(p.venda_id)!==String(correcaoVenda.id)),...(atualizados||[]).map(p=>({...p,venda_id:String(correcaoVenda.id)}))]);
+        if(historicoDetalhe&&String(historicoDetalhe.id)===String(correcaoVenda.id))setHistoricoPagamentos((atualizados||[]) as Record<string,unknown>[]);
       }
-      if(historicoDetalhe&&String(historicoDetalhe.id)===String(correcaoVenda.id)&&!erroLeitura)setHistoricoPagamentos((atualizados||[]) as Record<string,unknown>[]);
-    }catch(e){setCorrecaoErro(e instanceof Error?e.message:"Não foi possível corrigir o pagamento.");}
+    }catch(e){setCorrecaoErro((e instanceof Error?e.message:"Não foi possível corrigir o pagamento.")+" Feche e solicite uma nova autorização.");}
     finally{setCorrecaoSalvando(false);}
   }
-  function fecharCorrecao(){if(correcaoSalvando)return;setCorrecaoVenda(null);setCorrecaoErro("");setCorrecaoSucesso("");}
+  function fecharCorrecao(){
+    if(correcaoSalvando)return;
+    setCorrecaoVenda(null);setCorrecaoErro("");setCorrecaoSucesso("");setPagamentoCredencial(null);
+  }
   const historicoCampo = (registro:Record<string,unknown>,...nomes:string[]) => nomes.map(n=>registro[n]).find(v=>v!==null&&v!==undefined&&String(v)!=="");
   const historicoData = (registro:Record<string,unknown>) => String(historicoCampo(registro,"criada_em","created_at","data_venda","realizada_em","data","vendido_em")||"");
   const historicoValor = (registro:Record<string,unknown>,...nomes:string[]) => Number(historicoCampo(registro,...nomes)||0);
@@ -895,6 +964,7 @@ export default function PDV() {
 
   useEffect(() => {
     const atalho = (e: KeyboardEvent) => {
+      if(pinAcao){if(["Escape","F9","Delete"].includes(e.key))e.preventDefault();return;}
       if(e.key==="F10" && !e.repeat){
         // F10 fecha o caixa apenas no painel inicial. Na busca rápida de vendas,
         // F10 continua reservado à aba de produtos.
@@ -975,7 +1045,7 @@ export default function PDV() {
         
         if(e.key==="F2"){e.preventDefault();if(!e.repeat&&!modalCliente)alternarBuscaProduto();}
         if(e.key==="F3"){e.preventDefault();if(!modalCliente){setModalPesquisa(false);void abrirPesquisaCliente();}}
-        if(e.key==="Delete" && !((e.target as HTMLElement)?.closest("input,textarea,select"))){e.preventDefault();removerSelecionado();}
+        if(!pinAcao&&e.key==="Delete" && !((e.target as HTMLElement)?.closest("input,textarea,select"))){e.preventDefault();removerSelecionado();}
         if(modalCliente&&e.key==="F4"){e.preventDefault();editarCadastroRapido();}
          if(modalCliente&&e.key==="F5"){e.preventDefault();setEditarRapidoId(null);setCadastroRapido(abaBuscaRapida==="produtos"?"produto":"cliente");}
         if(modalCliente&&e.key==="F10"){e.preventDefault();setAbaBuscaRapida("produtos");setIndiceRapido(0);}
@@ -1000,7 +1070,7 @@ export default function PDV() {
     };
     window.addEventListener("keydown", atalho);
     return () => window.removeEventListener("keydown", atalho);
-  }, [telaVenda, abertura, empresaId, usuarioId, processandoCaixa, carrinho, itemSelecionado, produtoPendente, tipoBusca, modalCliente, modalPesquisa, cadastroRapido, modalOperacao, abaBuscaRapida, indiceRapido, produtosRapidos, clientesRapidos, pagamentos, descontoPagamento, vendaConfirmada, operacaoEnviada, finalizandoVenda, historicoAberto, historicoDetalhe, correcaoVenda, correcaoSalvando, cancelamentoAberto, cancelamentoSalvando, trocaPDVFinalizar, trocaPDVBuscaAberta, trocaPDVCatalogoAberto, turno, fechamentoAberto, fechamentoEnviando, consultaProdutosAberta, movCaixaTipo, trocaPDVAtiva, vendaConfirmada, modalOperacao, perfilFuncionario, configurandoCartao]);
+  }, [telaVenda, abertura, empresaId, usuarioId, processandoCaixa, carrinho, itemSelecionado, produtoPendente, tipoBusca, modalCliente, modalPesquisa, cadastroRapido, modalOperacao, abaBuscaRapida, indiceRapido, produtosRapidos, clientesRapidos, pagamentos, descontoPagamento, vendaConfirmada, operacaoEnviada, finalizandoVenda, historicoAberto, historicoDetalhe, correcaoVenda, correcaoSalvando, cancelamentoAberto, cancelamentoSalvando, trocaPDVFinalizar, trocaPDVBuscaAberta, trocaPDVCatalogoAberto, turno, fechamentoAberto, fechamentoEnviando, consultaProdutosAberta, movCaixaTipo, trocaPDVAtiva, vendaConfirmada, modalOperacao, perfilFuncionario, configurandoCartao, pinAcao]);
 
   useEffect(() => {
     let ativo = true;
@@ -1233,21 +1303,34 @@ export default function PDV() {
     setModalOperacao(null);setTelaVenda(false);
   }
 
-  function cancelarLancamento(){
-    if(operacaoEnviada || finalizandoRef.current)return;
+  async function cancelarLancamento(){
+    if(operacaoEnviada || finalizandoRef.current||pinAcao||pinProcessando)return;
     if(trocaPDVAtiva){cancelarTrocaPDV();return;}
-    if(carrinho.length && !window.confirm("Cancelar o lançamento atual? Nenhuma venda será registrada."))return;
+    if(carrinho.length){
+      if(perfilFuncionario!=="administrador"){
+        await pedirAutorizacao("cancelar_lancamento");
+        return;
+      }
+      if(!window.confirm("Cancelar o lançamento atual? Nenhuma venda será registrada."))return;
+    }
     setCarrinho([]);setBusca("");setItemSelecionado(null);setProdutoPendente(null);setTelaVenda(false);
   }
-  function removerSelecionado(){
-    if(operacaoEnviada)return;
-    if(!itemSelecionado)return;
+  async function removerSelecionado(){
+    if(operacaoEnviada||pinAcao||pinProcessando)return;
+    if(!itemSelecionado){setErro("Selecione o produto lançado antes de apagar.");return;}
     const item=carrinho.find(l=>l.produto.id===itemSelecionado);
-    if(item&&!window.confirm(`Remover ${item.produto.descricao} da venda atual?`))return;
+    if(!item){setErro("Produto não encontrado no lançamento.");return;}
+    setErro("");
+    // O perfil vem da sessão de funcionário já validada na entrada do PDV.
+    // Falha ou perfil desconhecido nunca libera exclusão direta.
+    if(perfilFuncionario!=="administrador"){
+      await pedirAutorizacao("apagar",itemSelecionado);
+      return;
+    }
+    if(!window.confirm(`Remover ${item.produto.descricao} da venda atual?`))return;
     setCarrinho(atual=>atual.filter(l=>l.produto.id!==itemSelecionado));
     setItemSelecionado(null);
   }
-
 
   function prepararProduto(produto: Produto) {
     if(operacaoEnviada)return;
@@ -1417,20 +1500,21 @@ export default function PDV() {
         </div>}
         {cancelamentoErro&&<p className="ev-hist-erro" role="alert">{cancelamentoErro}</p>}
         {cancelamentoSucesso&&<p className="ev-canc-sucesso" role="status">{cancelamentoSucesso}</p>}
-        {cancelamentoVenda&&String(cancelamentoVenda.situacao)==="concluida"&&!autorizacaoCancelamentoAberta&&!cancelamentoSucesso&&<div role="presentation" style={{position:"fixed",inset:0,zIndex:9998,display:"grid",placeItems:"center",background:"#071a35a8",padding:16}}><section role="dialog" aria-modal="true" aria-label="Motivo do cancelamento" style={{width:"min(480px,100%)",background:"white",borderRadius:16,overflow:"hidden",boxShadow:"0 24px 70px #071a3550"}}>
-          <header style={{background:"#102c58",color:"white",padding:"18px 22px",display:"flex",justifyContent:"space-between",alignItems:"center"}}><h3 style={{margin:0,fontSize:19,color:"white"}}>Motivo do cancelamento</h3><button type="button" onClick={()=>{setCancelamentoVenda(null);setCancelamentoMotivo("");setCancelamentoErro("");}} style={{background:"transparent",color:"white",border:"1px solid #ffffff70",borderRadius:8,padding:"6px 10px",cursor:"pointer"}}>✕</button></header>
+        {cancelamentoVenda&&String(cancelamentoVenda.situacao)==="concluida"&&cancelamentoAutorizado&&!autorizacaoCancelamentoAberta&&!cancelamentoSucesso&&<div role="presentation" style={{position:"fixed",inset:0,zIndex:9998,display:"grid",placeItems:"center",background:"#071a35a8",padding:16}}><section role="dialog" aria-modal="true" aria-label="Motivo do cancelamento" style={{width:"min(480px,100%)",background:"white",borderRadius:16,overflow:"hidden",boxShadow:"0 24px 70px #071a3550"}}>
+          <header style={{background:"#102c58",color:"white",padding:"18px 22px",display:"flex",justifyContent:"space-between",alignItems:"center"}}><h3 style={{margin:0,fontSize:19,color:"white"}}>Motivo do cancelamento</h3><button type="button" onClick={()=>{setCancelamentoVenda(null);setCancelamentoMotivo("");setCancelamentoErro("");setCancelamentoAutorizado(false);setAdminCancelamentoPin("");}} style={{background:"transparent",color:"white",border:"1px solid #ffffff70",borderRadius:8,padding:"6px 10px",cursor:"pointer"}}>✕</button></header>
           <div style={{padding:22,display:"grid",gap:15}}><p style={{margin:0,color:"#334155"}}>Venda #{String(cancelamentoVenda.numero)} · {dinheiro(Number(cancelamentoVenda.total||0))}</p>
+            {cancelamentoErro&&<p role="alert" style={{color:"#b42318",margin:0}}>{cancelamentoErro}</p>}
             <label style={{display:"grid",gap:7,color:"#102c58",fontWeight:600}}>Motivo obrigatório<textarea autoFocus rows={4} maxLength={1000} value={cancelamentoMotivo} onChange={e=>setCancelamentoMotivo(e.target.value)} placeholder="Informe o motivo (mínimo de 5 caracteres)" style={{width:"100%",boxSizing:"border-box",padding:12,border:"1px solid #cbd5e1",borderRadius:10,resize:"vertical"}}/></label>
-            <div style={{display:"flex",justifyContent:"flex-end",gap:10}}><button type="button" onClick={()=>{setCancelamentoVenda(null);setCancelamentoMotivo("");setCancelamentoErro("");}} style={{padding:"11px 15px",borderRadius:10,border:"1px solid #cbd5e1",background:"white"}}>Voltar</button><button type="button" disabled={cancelamentoMotivo.trim().length<5||!cancelamentoItens.length} onClick={()=>{setCancelamentoErro("");setAdminCancelamentoPin("");setAutorizacaoCancelamentoAberta(true);}} style={{padding:"11px 15px",borderRadius:10,border:0,background:"#102c58",color:"white",fontWeight:700,opacity:cancelamentoMotivo.trim().length<5?0.5:1}}>Continuar</button></div>
+            <div style={{display:"flex",justifyContent:"flex-end",gap:10}}><button type="button" onClick={()=>{setCancelamentoVenda(null);setCancelamentoMotivo("");setCancelamentoErro("");setCancelamentoAutorizado(false);setAdminCancelamentoPin("");}} style={{padding:"11px 15px",borderRadius:10,border:"1px solid #cbd5e1",background:"white"}}>Voltar</button><button type="button" disabled={!cancelamentoAutorizado||cancelamentoMotivo.trim().length<5||!cancelamentoItens.length||cancelamentoSalvando} onClick={()=>void confirmarCancelamentoVenda()} style={{padding:"11px 15px",borderRadius:10,border:0,background:"#102c58",color:"white",fontWeight:700,opacity:cancelamentoMotivo.trim().length<5?0.5:1}}>Confirmar cancelamento</button></div>
           </div></section></div>}
-        {cancelamentoVenda&&autorizacaoCancelamentoAberta&&String(cancelamentoVenda.situacao)==="concluida"&&<div role="presentation" style={{position:"fixed",inset:0,zIndex:9999,display:"grid",placeItems:"center",background:"#071a35a8",padding:16}}><section role="dialog" aria-modal="true" aria-label="Autorização de cancelamento" style={{width:"min(480px,100%)",background:"white",borderRadius:16,overflow:"hidden",boxShadow:"0 24px 70px #071a3550"}}>
-          <header style={{background:"#102c58",color:"white",padding:"18px 22px",display:"flex",justifyContent:"space-between",alignItems:"center"}}><h3 style={{margin:0,fontSize:19,color:"white"}}>Autorização de cancelamento</h3><button type="button" disabled={cancelamentoSalvando} onClick={()=>{setAutorizacaoCancelamentoAberta(false);setAdminCancelamentoPin("");setCancelamentoErro("");}} style={{background:"transparent",color:"white",border:"1px solid #ffffff70",borderRadius:8,padding:"6px 10px",cursor:"pointer"}}>✕</button></header>
+        {cancelamentoVenda&&autorizacaoCancelamentoAberta&&!cancelamentoAutorizado&&String(cancelamentoVenda.situacao)==="concluida"&&<div role="presentation" style={{position:"fixed",inset:0,zIndex:9999,display:"grid",placeItems:"center",background:"#071a35a8",padding:16}}><section role="dialog" aria-modal="true" aria-label="Autorização de cancelamento" style={{width:"min(480px,100%)",background:"white",borderRadius:16,overflow:"hidden",boxShadow:"0 24px 70px #071a3550"}}>
+          <header style={{background:"#102c58",color:"white",padding:"18px 22px",display:"flex",justifyContent:"space-between",alignItems:"center"}}><h3 style={{margin:0,fontSize:19,color:"white"}}>Autorização de cancelamento</h3><button type="button" disabled={cancelamentoSalvando} onClick={()=>{setAutorizacaoCancelamentoAberta(false);setAdminCancelamentoPin("");setCancelamentoAutorizado(false);setCancelamentoVenda(null);setCancelamentoErro("");}} style={{background:"transparent",color:"white",border:"1px solid #ffffff70",borderRadius:8,padding:"6px 10px",cursor:"pointer"}}>✕</button></header>
           <div style={{padding:22,display:"grid",gap:15}}><p style={{margin:0,color:"#334155"}}>Venda #{String(cancelamentoVenda.numero)}. O administrador deve autorizar o cancelamento.</p>
             <label style={{display:"grid",gap:7,fontWeight:600,color:"#102c58"}}>Administrador<select value={adminCancelamentoId} onChange={e=>{setAdminCancelamentoId(e.target.value);setAdminCancelamentoPin("");}} disabled={cancelamentoSalvando} style={{width:"100%",padding:12,border:"1px solid #cbd5e1",borderRadius:10,background:"white"}}><option value="">Selecione um administrador</option>{adminsCancelamento.map(a=><option key={a.id} value={a.id}>{a.nome}</option>)}</select></label>
             <label style={{display:"grid",gap:7,fontWeight:600,color:"#102c58"}}>PIN do administrador<div style={{display:"flex",gap:8}}><input type={mostrarPinCancelamento?"text":"password"} autoComplete="off" value={adminCancelamentoPin} onChange={e=>setAdminCancelamentoPin(e.target.value)} disabled={cancelamentoSalvando} placeholder="PIN individual" style={{flex:1,minWidth:0,padding:12,border:"1px solid #cbd5e1",borderRadius:10}}/><button type="button" onClick={()=>setMostrarPinCancelamento(v=>!v)} style={{background:"#f1f5f9",border:"1px solid #cbd5e1",borderRadius:10,padding:"0 12px"}}>{mostrarPinCancelamento?"Ocultar":"👁 Mostrar"}</button></div></label>
             {cancelamentoErro&&<p role="alert" style={{color:"#b42318",margin:0}}>{cancelamentoErro}</p>}
             <p style={{fontSize:12,color:"#64748b",margin:0}}>A operação devolve os produtos ao estoque e registra o estorno como pendente.</p>
-            <div style={{display:"flex",justifyContent:"flex-end",gap:10}}><button type="button" disabled={cancelamentoSalvando} onClick={()=>{setAutorizacaoCancelamentoAberta(false);setAdminCancelamentoPin("");setCancelamentoErro("");}} style={{padding:"11px 15px",borderRadius:10,border:"1px solid #cbd5e1",background:"white"}}>Voltar</button><button type="button" disabled={cancelamentoSalvando||validandoAdminCancelamento||!adminCancelamentoId||adminCancelamentoPin.length<3} onClick={()=>void validarAdministradorCancelamento()} style={{padding:"11px 15px",borderRadius:10,border:0,background:"#b42318",color:"white",fontWeight:700}}>{cancelamentoSalvando?"Cancelando...":validandoAdminCancelamento?"Validando...":"Cancelar venda"}</button></div>
+            <div style={{display:"flex",justifyContent:"flex-end",gap:10}}><button type="button" disabled={cancelamentoSalvando} onClick={()=>{setAutorizacaoCancelamentoAberta(false);setAdminCancelamentoPin("");setCancelamentoAutorizado(false);setCancelamentoVenda(null);setCancelamentoErro("");}} style={{padding:"11px 15px",borderRadius:10,border:"1px solid #cbd5e1",background:"white"}}>Voltar</button><button type="button" disabled={cancelamentoSalvando||validandoAdminCancelamento||!adminCancelamentoId||adminCancelamentoPin.length<3} onClick={()=>void validarAdministradorCancelamento()} style={{padding:"11px 15px",borderRadius:10,border:0,background:"#b42318",color:"white",fontWeight:700}}>{validandoAdminCancelamento?"Validando...":"Validar PIN"}</button></div>
           </div></section></div>}
       </div>
     </section></div>}
@@ -1448,7 +1532,7 @@ export default function PDV() {
         {historicoErro&&<p className="ev-hist-erro" role="alert">{historicoErro}. Confira as permissões de leitura (RLS) da tabela vendas.</p>}
         {historicoPagamentosErro&&<p className="ev-hist-erro" role="alert">{historicoPagamentosErro}</p>}
         {historicoImpressaoErro&&<p className="ev-hist-erro" role="alert">Reimpressão: {historicoImpressaoErro}</p>}
-        {historicoCarregando?<p>Carregando vendas do Supabase...</p>:<div className="ev-hist-tabela"><table><thead><tr><th>Recibo</th><th>Data e hora</th><th>Valor</th><th>Forma de pagamento</th><th>Ações</th></tr></thead><tbody>{historicoFiltrado.map((v,i)=><tr key={String(v.id||i)}><td>#{historicoNumero(v)}{String(v.situacao)==="cancelada"&&<span style={{display:"block",color:"#a21d2b",fontWeight:700,fontSize:11}}>CANCELADA</span>}</td><td>{historicoHorario(v)}</td><td>{dinheiro(historicoValor(v,"total","valor_total"))}</td><td className="ev-hist-forma">{formaPagamentoHistorico(v)}</td><td><div className="ev-hist-acoes"><button type="button" onClick={()=>void abrirDetalheHistorico(v)}>Detalhes</button><button type="button" className="ev-hist-corrigir" disabled={String(v.situacao)!=="concluida"} onClick={()=>void abrirCorrecao(v)}>Alterar pagamento</button><button type="button" className="ev-hist-reimprimir" disabled={historicoImprimindo!==null||String(v.situacao)!=="concluida"} onClick={()=>void reimprimirHistorico(v)}>{historicoImprimindo===String(v.id)?"Preparando...":"▣ Reimprimir"}</button></div></td></tr>)}</tbody></table>{!historicoFiltrado.length&&!historicoErro&&<p>Nenhuma venda encontrada para o período selecionado.</p>}</div>}
+        {historicoCarregando?<p>Carregando vendas do Supabase...</p>:<div className="ev-hist-tabela"><table><thead><tr><th>Recibo</th><th>Data e hora</th><th>Valor</th><th>Forma de pagamento</th><th>Ações</th></tr></thead><tbody>{historicoFiltrado.map((v,i)=><tr key={String(v.id||i)}><td>#{historicoNumero(v)}{String(v.situacao)==="cancelada"&&<span style={{display:"block",color:"#a21d2b",fontWeight:700,fontSize:11}}>CANCELADA</span>}</td><td>{historicoHorario(v)}</td><td>{dinheiro(historicoValor(v,"total","valor_total"))}</td><td className="ev-hist-forma">{formaPagamentoHistorico(v)}</td><td><div className="ev-hist-acoes"><button type="button" onClick={()=>void abrirDetalheHistorico(v)}>Detalhes</button><button type="button" className="ev-hist-corrigir" disabled={String(v.situacao)!=="concluida"} onClick={()=>{setPagamentoPendente(v);setPagamentoCredencial(null);void pedirAutorizacao("pagamento");}}>Alterar pagamento</button><button type="button" className="ev-hist-reimprimir" disabled={historicoImprimindo!==null||String(v.situacao)!=="concluida"} onClick={()=>void reimprimirHistorico(v)}>{historicoImprimindo===String(v.id)?"Preparando...":"▣ Reimprimir"}</button></div></td></tr>)}</tbody></table>{!historicoFiltrado.length&&!historicoErro&&<p>Nenhuma venda encontrada para o período selecionado.</p>}</div>}
         {historicoVendas.length===1000&&<p className="ev-hist-aviso">A consulta está limitada aos primeiros 1.000 registros. Use um filtro no banco para relatórios completos.</p>}
       </div>}
       {correcaoVenda&&<div className="ev-correcao-fundo"><section className="ev-correcao-modal" role="dialog" aria-modal="true" aria-label="Corrigir forma de pagamento">
@@ -1471,6 +1555,33 @@ export default function PDV() {
         </div>
       </section></div>}
     </section></div>}
+    {pinAcao&&<div style={{position:"fixed",inset:0,zIndex:99999,background:"rgba(6,19,43,.7)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+      <section role="dialog" aria-modal="true" aria-label="Autorização do administrador" style={{background:"#fff",borderRadius:16,width:"min(440px,100%)",overflow:"hidden",boxShadow:"0 20px 60px #0005"}}>
+        <header style={{background:"#102c58",color:"#fff",padding:"16px 20px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <strong>Autorização do administrador</strong>
+          <button type="button" aria-label="Fechar" disabled={pinProcessando} onClick={()=>{setPinAcao(null);setPinValor("");setPagamentoPendente(null);}} style={{background:"transparent",border:0,color:"#fff",fontSize:23,cursor:"pointer"}}>×</button>
+        </header>
+        <div style={{padding:20,display:"grid",gap:14,color:"#14243d"}}>
+          <p style={{margin:0}}>{pinAcao==="apagar"?"Autorizar exclusão do produto lançado.":pinAcao==="cancelar_lancamento"?"Autorizar cancelamento do lançamento atual.":"Autorizar alteração do pagamento da venda."}</p>
+          <label style={{display:"grid",gap:6}}>Administrador
+            <select value={pinAdminId} onChange={e=>setPinAdminId(e.target.value)} disabled={pinProcessando} style={{padding:11,borderRadius:9,border:"1px solid #bdc9d9"}}>
+              {pinAdmins.map(a=><option key={a.id} value={a.id}>{a.nome}</option>)}
+            </select>
+          </label>
+          <label style={{display:"grid",gap:6}}>PIN do administrador
+            <div style={{display:"flex",gap:8}}>
+              <input autoFocus type={pinMostrar?"text":"password"} autoComplete="off" inputMode="numeric" value={pinValor} onChange={e=>{setPinValor(e.target.value);setPinErro("");}} onKeyDown={e=>{e.stopPropagation();if(e.key==="Enter"){e.preventDefault();void confirmarAutorizacao();}}} maxLength={64} style={{flex:1,minWidth:0,padding:11,borderRadius:9,border:"1px solid #bdc9d9"}}/>
+              <button type="button" onClick={()=>setPinMostrar(a=>!a)}>{pinMostrar?"Ocultar":"Mostrar"}</button>
+            </div>
+          </label>
+          {pinErro&&<p role="alert" style={{color:"#b42332",margin:0}}>{pinErro}</p>}
+          <div style={{display:"flex",justifyContent:"flex-end",gap:10}}>
+            <button type="button" disabled={pinProcessando} onClick={()=>{setPinAcao(null);setPinValor("");setPagamentoPendente(null);}} style={{padding:"10px 15px",borderRadius:9}}>Cancelar</button>
+            <button type="button" disabled={pinProcessando||!pinAdminId||pinValor.length<3} onClick={()=>void confirmarAutorizacao()} style={{padding:"10px 15px",borderRadius:9,background:"#102c58",color:"#fff",border:0}}>{pinProcessando?"Validando...":"Autorizar"}</button>
+          </div>
+        </div>
+      </section>
+    </div>}
     <footer className="ev-novo-rodape"><span>EVOLUX • Gestão Empresarial</span><span>PDV • Terminal 01</span></footer>
     <style jsx>{`
     .ev-turno-overlay{position:fixed;inset:0;z-index:2000;background:#07162f55;display:flex;align-items:center;justify-content:center;padding:15px}.ev-turno-modal{width:min(430px,100%);background:#fff;border:1px solid #b7c5d9;border-radius:8px;box-shadow:0 18px 50px #0004;padding:0 18px 18px;color:#142b4d;font-size:14px}.ev-turno-modal header{font-weight:700;font-size:16px;margin:0 -18px 18px;padding:15px 18px;background:#eef3fa;border-bottom:1px solid #dce5f0}.ev-turno-modal p{line-height:1.5}.ev-turno-campos{display:flex;gap:30px;margin-bottom:18px}.ev-turno-campos>div{display:flex;flex-direction:column;gap:5px}.ev-turno-campos small{color:#60728a}.ev-turno-modal form{display:flex;flex-direction:column;gap:10px}.ev-turno-modal input{padding:11px;border:1px solid #aabbd2;border-radius:5px;font-size:17px}.ev-turno-acoes{display:flex;justify-content:flex-end;gap:9px;margin-top:16px}.ev-turno-acoes button{padding:11px 15px;border:1px solid #b5c6dc;border-radius:6px;background:#f3f6fa;cursor:pointer}.ev-turno-acoes button:first-child{background:#0b2454;color:#fff}.ev-turno-acoes button:disabled{opacity:.5}.ev-turno-erro,.ev-caixa-erro{color:#a32626;background:#fff0ee;padding:10px;border-radius:5px}.ev-caixa-erro,.ev-caixa-processando{position:absolute;top:120px;left:18px;max-width:500px;font-size:13px}.ev-caixa-processando{color:#344761}
@@ -1705,6 +1816,33 @@ export default function PDV() {
       <div className="ev-venda-linha-baixo"><span className="ev-venda-numero">↩</span><span className="ev-venda-calculo">− {dinheiro(Number(trocaPDVItem.preco_unitario))} <small>UN</small> <b>×</b> <span className="ev-venda-qtd-fixa">{trocaPDVQtd}</span> <b>=</b> <strong>− {dinheiro(trocaPDVValorDevolvido)}</strong></span></div>
     </div>}{carrinho.map((l,i)=><div key={l.produto.id} className={`ev-venda-linha ${itemSelecionado===l.produto.id?"selecionado":""}`} onClick={()=>setItemSelecionado(l.produto.id)}><div className="ev-venda-linha-topo"><strong>{l.produto.descricao}</strong><span>{l.produto.codigo_barras||l.produto.codigo}</span></div><div className="ev-venda-linha-baixo"><span className="ev-venda-numero">{i+1}</span><span className="ev-venda-calculo">{dinheiro(Number(l.produto.preco_venda))} <small>UN</small> <b>×</b> <span className="ev-venda-qtd-fixa" aria-label={`Quantidade de ${l.produto.descricao}: ${l.quantidade}`}>{l.quantidade}</span> <b>=</b> <strong>{dinheiro(l.quantidade*Number(l.produto.preco_venda))}</strong></span></div></div>)}</div></section></div>
     <div className="ev-venda-totais"><div><strong>ITENS & LANÇAMENTOS</strong><span>{carrinho.length} itens • {unidades} unidades</span></div><div><strong>{trocaPDVAtiva?(trocaPDVDiferenca>0?"CLIENTE PAGA":trocaPDVDiferenca<0?"CLIENTE RECEBE":"TROCA SEM DIFERENÇA"):"TOTAL DO LANÇAMENTO"}</strong><b>{dinheiro(trocaPDVAtiva?Math.abs(trocaPDVDiferenca):total)}</b></div></div>
+    {pinAcao&&<div style={{position:"fixed",inset:0,zIndex:99999,background:"rgba(6,19,43,.7)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+      <section role="dialog" aria-modal="true" aria-label="Autorização do administrador" style={{background:"#fff",borderRadius:16,width:"min(440px,100%)",overflow:"hidden",boxShadow:"0 20px 60px #0005"}}>
+        <header style={{background:"#102c58",color:"#fff",padding:"16px 20px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <strong>Autorização do administrador</strong>
+          <button type="button" aria-label="Fechar" disabled={pinProcessando} onClick={()=>{setPinAcao(null);setPinValor("");setPagamentoPendente(null);}} style={{background:"transparent",border:0,color:"#fff",fontSize:23,cursor:"pointer"}}>×</button>
+        </header>
+        <div style={{padding:20,display:"grid",gap:14,color:"#14243d"}}>
+          <p style={{margin:0}}>{pinAcao==="apagar"?"Autorizar exclusão do produto lançado.":pinAcao==="cancelar_lancamento"?"Autorizar cancelamento do lançamento atual.":"Autorizar alteração do pagamento da venda."}</p>
+          <label style={{display:"grid",gap:6}}>Administrador
+            <select value={pinAdminId} onChange={e=>setPinAdminId(e.target.value)} disabled={pinProcessando} style={{padding:11,borderRadius:9,border:"1px solid #bdc9d9"}}>
+              {pinAdmins.map(a=><option key={a.id} value={a.id}>{a.nome}</option>)}
+            </select>
+          </label>
+          <label style={{display:"grid",gap:6}}>PIN do administrador
+            <div style={{display:"flex",gap:8}}>
+              <input autoFocus type={pinMostrar?"text":"password"} autoComplete="off" inputMode="numeric" value={pinValor} onChange={e=>{setPinValor(e.target.value);setPinErro("");}} onKeyDown={e=>{e.stopPropagation();if(e.key==="Enter"){e.preventDefault();void confirmarAutorizacao();}}} maxLength={64} style={{flex:1,minWidth:0,padding:11,borderRadius:9,border:"1px solid #bdc9d9"}}/>
+              <button type="button" onClick={()=>setPinMostrar(a=>!a)}>{pinMostrar?"Ocultar":"Mostrar"}</button>
+            </div>
+          </label>
+          {pinErro&&<p role="alert" style={{color:"#b42332",margin:0}}>{pinErro}</p>}
+          <div style={{display:"flex",justifyContent:"flex-end",gap:10}}>
+            <button type="button" disabled={pinProcessando} onClick={()=>{setPinAcao(null);setPinValor("");setPagamentoPendente(null);}} style={{padding:"10px 15px",borderRadius:9}}>Cancelar</button>
+            <button type="button" disabled={pinProcessando||!pinAdminId||pinValor.length<3} onClick={()=>void confirmarAutorizacao()} style={{padding:"10px 15px",borderRadius:9,background:"#102c58",color:"#fff",border:0}}>{pinProcessando?"Validando...":"Autorizar"}</button>
+          </div>
+        </div>
+      </section>
+    </div>}
     <footer className="ev-venda-footer ev-operacoes-rodape"><div className="ev-venda-acoes"><button type="button" className="ev-acao-apagar" onClick={removerSelecionado} disabled={!itemSelecionado}><span aria-hidden="true">🗑️</span><small>APAGAR ITEM (DEL)</small></button><button type="button" className="ev-acao-troca" onClick={iniciarTrocaPDV}><span aria-hidden="true">⇄</span><small>TROCA DE PRODUTOS (F7)</small></button></div><button type="button" className="ev-venda-concluir" disabled={!trocaPDVAtiva&&!carrinho.length} onClick={abrirPagamento}><span aria-hidden="true">✓</span><small>{trocaPDVAtiva?"CONFERIR TROCA (F12)":"CONCLUIR LANÇAMENTO (F12)"}</small></button><button type="button" className="ev-venda-cancelar" onClick={cancelarLancamento} disabled={operacaoEnviada}><span aria-hidden="true">✕</span><small>{trocaPDVAtiva?"CANCELAR TROCA (F9)":"CANCELAR LANÇAMENTO (F9)"}</small></button></footer>
     {trocaPDVBuscaAberta&&<div className="ev-venda-overlay"><section className="ev-operacao-dialog ev-troca-pdv-dialog" role="dialog" aria-modal="true" aria-label="Localizar produto para troca">
       <header><h2>F7 — LOCALIZAR PRODUTO DEVOLVIDO</h2><button type="button" onClick={()=>setTrocaPDVBuscaAberta(false)}>×</button></header>
