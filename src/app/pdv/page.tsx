@@ -5,6 +5,9 @@ import Link from "next/link";
 import ClientesModal from "../dashboard/ClientesModal";
 import ProdutoCadastroRapido from "./ProdutoCadastroRapido";
 import { createClient } from "@supabase/supabase-js";
+import {caixaIndividual} from "@/lib/caixa-individual-client";
+import {temAteDuasCasas} from "@/lib/dinheiro";
+import {carregarProdutosAtivos} from "@/lib/produtos-client";
 
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
@@ -18,6 +21,28 @@ export default function PDV() {
   const [telaVenda, setTelaVenda] = useState(false);
   const [usuarioId, setUsuarioId] = useState("");
   const [turno, setTurno] = useState<{id:string;numero:number;saldo_inicial:number}|null>(null);
+  // Bloqueio preventivo da interface; os gatilhos financeiros no banco permanecem obrigatórios.
+  const [caixaEmConferencia,setCaixaEmConferencia]=useState(false);
+  const [verificandoConferencia,setVerificandoConferencia]=useState(false);
+  const avisoConferencia="Caixa em conferência — aguarde a aprovação do supervisor ou realize a recontagem. Não é permitido vender ou movimentar este turno.";
+  async function verificarConferencia(turnoId:string):Promise<boolean>{
+    if(!supabase)throw new Error("Conexão indisponível para verificar o caixa.");
+    const {data,error}=await supabase.rpc("evolux_status_caixa",{p_caixa_turno_id:turnoId});
+    if(error)throw new Error("Não foi possível verificar o fechamento do caixa: "+error.message);
+    // A existência de uma tentativa, mesmo devolvida, mantém o turno bloqueado.
+    const bloqueado=String(data?.status||"")!=="novo";
+    setCaixaEmConferencia(bloqueado);
+    return bloqueado;
+  }
+  useEffect(()=>{
+    if(!turno){setCaixaEmConferencia(false);return;}
+    let ativo=true;
+    setVerificandoConferencia(true);
+    void verificarConferencia(turno.id).catch(()=>{if(ativo)setCaixaEmConferencia(true);})
+      .finally(()=>{if(ativo)setVerificandoConferencia(false);});
+    return ()=>{ativo=false;};
+  },[turno?.id]);
+
   const [abertura, setAbertura] = useState<"pergunta"|"formulario"|null>(null);
   const [saldoInicial, setSaldoInicial] = useState("0,00");
   const [processandoCaixa, setProcessandoCaixa] = useState(false);
@@ -32,10 +57,12 @@ export default function PDV() {
   const movCaixaChave=useRef<string|null>(null);
   function abrirMovCaixa(tipo:"sangria"|"suprimento"){
     if(!turno){setErroCaixa("Abra um turno de caixa antes de registrar movimentações.");return;}
+    if(caixaEmConferencia||verificandoConferencia){setErroCaixa(avisoConferencia);return;}
     setMovCaixaTipo(tipo);setMovCaixaValor("");setMovCaixaMotivo("");setMovCaixaErro("");movCaixaChave.current=null;
   }
   async function salvarMovCaixa(){
     if(!supabase||!turno||!movCaixaTipo||movCaixaSalvando)return;
+    try{if(await verificarConferencia(turno.id)){setMovCaixaErro(avisoConferencia);return;}}catch(e){setMovCaixaErro(e instanceof Error?e.message:"Não foi possível verificar o turno.");return;}
     const texto=movCaixaValor.trim().replace(/\./g,"").replace(",",".");
     if(!/^\d+(?:\.\d{1,2})?$/.test(texto)||Number(texto)<=0){setMovCaixaErro("Informe um valor positivo com até duas casas decimais.");return;}
     if(movCaixaMotivo.trim().length<5){setMovCaixaErro("Informe um motivo com pelo menos 5 caracteres.");return;}
@@ -62,9 +89,7 @@ export default function PDV() {
     if(!supabase||!empresaId){setConsultaProdutosErro("Empresa ainda não identificada.");return;}
     setConsultaProdutosCarregando(true);
     try{
-      const {data,error}=await supabase.from("produtos")
-        .select("id,codigo,descricao,codigo_barras,preco_venda,estoque_atual,ativo")
-        .eq("empresa_id",empresaId).eq("ativo",true).order("descricao").limit(1000);
+      const {data,error}=await carregarProdutosAtivos(supabase,empresaId,"id,codigo,descricao,codigo_barras,preco_venda,estoque_atual,ativo");
       if(error)throw new Error(error.message);
       setConsultaProdutosLista((data||[]) as Produto[]);
     }catch(e){setConsultaProdutosErro(e instanceof Error?e.message:"Não foi possível consultar os produtos.");}
@@ -115,11 +140,8 @@ export default function PDV() {
     if(!window.confirm("Enviar a contagem cega para aprovação do supervisor?"))return;
     setFechamentoEnviando(true);setFechamentoErro("");
     try{
-      const {error}=await supabase.rpc("evolux_enviar_caixa_supervisao",{
-        p_caixa_turno_id:turno.id,p_dinheiro:d/100,p_pix:p/100,p_cartao:c/100,
-        p_justificativa:fechamentoObservacao.trim()||null
-      });
-      if(error)throw new Error(error.message);
+      await caixaIndividual("enviar",{turno_id:turno.id,dinheiro:d/100,pix:p/100,cartao:c/100,justificativa:fechamentoObservacao.trim()||null});
+      setCaixaEmConferencia(true);
       setFechamentoStatus("Contagem enviada. Aguarde a conferência e aprovação do supervisor.");
     }catch(e){setFechamentoErro(e instanceof Error?e.message:"Falha ao enviar a contagem.");}
     finally{setFechamentoEnviando(false);}
@@ -352,7 +374,7 @@ export default function PDV() {
       setCancelamentoSucesso(`Venda #${numero} cancelada. Estoque devolvido; estorno financeiro pendente.`);setAutorizacaoCancelamentoAberta(false);setCancelamentoAutorizado(false);setCancelamentoVenda(null);
       setHistoricoVendas(atuais=>atuais.map(v=>String(v.id)===String(cancelamentoVenda.id)?{...v,situacao:"cancelada"}:v));
       // Os produtos exibidos na tela de venda devem ser recarregados do banco.
-      if(empresaId){const consulta=await supabase.from("produtos").select("id,codigo,descricao,codigo_barras,preco_custo,preco_venda,estoque_atual,ativo").eq("empresa_id",empresaId).eq("ativo",true).order("descricao").limit(1000);if(!consulta.error)setProdutos((consulta.data||[]) as Produto[]);}
+      if(empresaId){const consulta=await carregarProdutosAtivos(supabase,empresaId,"id,codigo,descricao,codigo_barras,preco_custo,preco_venda,estoque_atual,ativo");if(!consulta.error)setProdutos((consulta.data||[]) as Produto[]);}
     }catch(e){setCancelamentoErro(e instanceof Error?e.message:"Falha ao cancelar. Verifique a situação da venda antes de tentar novamente.");}
     finally{setCancelamentoSalvando(false);setAdminCancelamentoPin("");}
   }
@@ -453,7 +475,7 @@ export default function PDV() {
       if(error){const erroNovo=new Error(error.message) as Error&{codigo?:string};erroNovo.codigo=error.code;throw erroNovo;}
       if(!data?.sucesso)throw new Error("O banco não confirmou a operação. Consulte as trocas antes de tentar novamente.");
       setTrocaSucesso(`Troca registrada! Código ${String(data.troca_id).slice(0,8)}. ${trocaDiferenca<0?(trocaDestino==="credito"?"Crédito gerado.":"Reembolso pendente de confirmação."):trocaDiferenca>0?"Diferença registrada.":"Sem diferença financeira."}`);
-      const consulta=await supabase.from("produtos").select("id,codigo,descricao,codigo_barras,preco_custo,preco_venda,estoque_atual,ativo").eq("empresa_id",empresaId).eq("ativo",true).order("descricao").limit(1000);
+      const consulta=await carregarProdutosAtivos(supabase,empresaId,"id,codigo,descricao,codigo_barras,preco_custo,preco_venda,estoque_atual,ativo");
       if(!consulta.error)setProdutos((consulta.data||[]) as Produto[]);
     }catch(e){
       setTrocaErro(e instanceof Error?e.message:"Não foi possível registrar a troca.");
@@ -462,7 +484,7 @@ export default function PDV() {
     }finally{setTrocaSalvando(false);}
   }
   const [historicoAberto,setHistoricoAberto] = useState(false);
-  const [historicoPeriodo,setHistoricoPeriodo] = useState<"turno"|"hoje">("turno");
+  const [historicoPeriodo,setHistoricoPeriodo] = useState<"turno"|"hoje"|"canceladas">("turno");
   const [historicoBusca,setHistoricoBusca] = useState("");
   const [historicoCarregando,setHistoricoCarregando] = useState(false);
   const [historicoErro,setHistoricoErro] = useState("");
@@ -708,19 +730,30 @@ export default function PDV() {
     // dataAtual é preenchida no useEffect, evitando new Date() na renderização.
     if(!dataAtual || d.toLocaleDateString("pt-BR",{timeZone:"America/Sao_Paulo"})!==dataAtual)return false;
     if(historicoPeriodo==="turno"&&(!turno||String(historicoCampo(v,"caixa_turno_id","turno_id")||"")!==turno.id))return false;
+    if(historicoPeriodo==="canceladas" ? String(v.situacao)!=="cancelada" : String(v.situacao)!=="concluida")return false;
     const termo=historicoBusca.trim().toLocaleLowerCase("pt-BR");
     return !termo||historicoNumero(v).toLocaleLowerCase("pt-BR").includes(termo)||String(historicoCampo(v,"cliente_nome","nome_cliente")||"").toLocaleLowerCase("pt-BR").includes(termo);
   }).sort((a,b)=>new Date(historicoData(b)).getTime()-new Date(historicoData(a)).getTime());
   const historicoTotal=historicoFiltrado.reduce((a,v)=>a+historicoValor(v,"total","valor_total"),0);
 
   const [operador, setOperador] = useState("ADMINISTRADOR");
+  const [perfilFuncionario, setPerfilFuncionario] = useState<"administrador"|"vendedor"|null>(null);
   const [empresaId, setEmpresaId] = useState("");
   const [empresa, setEmpresa] = useState("EVOLUX");
   const [dadosEmpresaCupom,setDadosEmpresaCupom] = useState<Record<string,unknown>>({});
   const [carrinho, setCarrinho] = useState<Linha[]>([]);
   const [modalOperacao,setModalOperacao] = useState<"pagamento"|"devolucao"|null>(null);
-  const [pagamentos,setPagamentos] = useState({dinheiro:"",pix:"",cartao:""});
+  const [pagamentos,setPagamentos] = useState({dinheiro:"",pix:"",cartao:"",debito:"",credito:""});
+  const [cartaoModalidade,setCartaoModalidade] = useState<"debito"|"credito">("debito");
+  const [cartaoBandeira,setCartaoBandeira] = useState("visa");
+  const [bandeiraDebito,setBandeiraDebito] = useState("visa");
+  const [bandeiraCredito,setBandeiraCredito] = useState("visa");
+  const [cartaoParcelas,setCartaoParcelas] = useState<1|2|3>(1);
+  // Janela de configuração de cartão, independente da janela principal de pagamento.
+  const [configurandoCartao,setConfigurandoCartao] = useState<"debito"|"credito"|null>(null);
+  const [cartoesConfigurados,setCartoesConfigurados] = useState({debito:false,credito:false});
   const [descontoPagamento,setDescontoPagamento] = useState("");
+  const [descontoTipo,setDescontoTipo] = useState<"valor"|"percentual">("valor");
   const [finalizandoVenda,setFinalizandoVenda] = useState(false);
   const finalizandoRef = useRef(false);
   const [erroPagamento,setErroPagamento] = useState("");
@@ -769,7 +802,7 @@ export default function PDV() {
   async function atualizarBuscaRapida(){
     if(!supabase||!empresaId)return;
     const [p,c]=await Promise.all([
-      supabase.from("produtos").select("id,codigo,descricao,codigo_barras,preco_custo,preco_venda,estoque_atual,ativo").eq("empresa_id",empresaId).eq("ativo",true).order("descricao").limit(1000),
+      carregarProdutosAtivos(supabase,empresaId,"id,codigo,descricao,codigo_barras,preco_custo,preco_venda,estoque_atual,ativo"),
       supabase.from("clientes").select("*").eq("empresa_id",empresaId).eq("ativo",true).limit(500)
     ]);
     if(p.error)setErro("Não foi possível atualizar produtos: "+p.error.message);
@@ -810,35 +843,30 @@ export default function PDV() {
       return;
     }
     setProcessandoCaixa(true);
-    const {data,error} = await supabase.from("caixa_turnos")
-      .select("id,numero,saldo_inicial").eq("empresa_id",empresaId)
-      .eq("operador_id",usuarioId).eq("situacao","aberto")
-      .maybeSingle();
+    let data: {id:string;numero:number;saldo_inicial:number}|null=null;
+    try { const resposta=await caixaIndividual("turno");data=resposta.turno; }
+    catch(e){setProcessandoCaixa(false);setErroCaixa(e instanceof Error?e.message:"Falha ao consultar o turno");return;}
     setProcessandoCaixa(false);
-    if (error) {
-      setErroCaixa("Não foi possível verificar o caixa: "+error.message+" Verifique se executou o SQL da Etapa 24.2.");
-      return;
+    if (data) {
+      setTurno(data);
+      try{
+        if(await verificarConferencia(data.id)){setErroCaixa(avisoConferencia);return;}
+      }catch(e){setErroCaixa(e instanceof Error?e.message:"Não foi possível verificar o turno.");return;}
+      setTelaVenda(true);
     }
-    if (data) { setTurno(data); setTelaVenda(true); }
     else { setTurno(null); setAbertura("pergunta"); }
   }
 
   async function abrirCaixa() {
     if (!supabase || !empresaId || !usuarioId || processandoCaixa) return;
-    const valor = Number(saldoInicial.trim().replace(/\\./g,"").replace(",","."));
-    if (!Number.isFinite(valor) || valor < 0 || Math.round(valor*100)!==valor*100) {
+    const valor = Number(saldoInicial.trim().replace(/\./g,"").replace(",","."));
+    if (!Number.isFinite(valor) || valor < 0 || !temAteDuasCasas(valor)) {
       setErroCaixa("Informe um saldo inicial válido, com até duas casas decimais.");return;
     }
     setProcessandoCaixa(true);setErroCaixa("");
-    const {data,error}=await supabase.from("caixa_turnos")
-      .insert({empresa_id:empresaId,operador_id:usuarioId,saldo_inicial:valor})
-      .select("id,numero,saldo_inicial").single();
-    if (error) {
-      setErroCaixa(error.code==="23505"
-        ? "Já existe um caixa aberto para este operador. Feche esta janela e tente iniciar a venda novamente."
-        : "Não foi possível abrir o caixa: "+error.message);
-      setProcessandoCaixa(false);return;
-    }
+    let data:{id:string;numero:number;saldo_inicial:number};
+    try { const resposta=await caixaIndividual("abrir",{saldo_inicial:valor});data=resposta.turno; }
+    catch(e){setErroCaixa(e instanceof Error?e.message:"Falha ao abrir o caixa");setProcessandoCaixa(false);return;}
     setTurno(data);setAbertura(null);setProcessandoCaixa(false);setTelaVenda(true);
   }
 
@@ -858,11 +886,8 @@ export default function PDV() {
     if(!supabase || !empresaId || !usuarioId)return;
     let ativo=true;
     async function consultarTurno(){
-      const {data,error}=await supabase!.from("caixa_turnos")
-        .select("id,numero,saldo_inicial")
-        .eq("empresa_id",empresaId).eq("operador_id",usuarioId)
-        .eq("situacao","aberto").maybeSingle();
-      if(ativo && !error)setTurno(data);
+      try {const resposta=await caixaIndividual("turno");if(ativo)setTurno(resposta.turno);}
+      catch {if(ativo)setTurno(null);}
     }
     void consultarTurno();
     return ()=>{ativo=false;};
@@ -926,11 +951,20 @@ export default function PDV() {
           iniciarTrocaPDV();return;
         }
         if(modalOperacao){
+          if(configurandoCartao){
+            if(e.key==="Escape"){e.preventDefault();setConfigurandoCartao(null);}
+            if(e.key==="Enter" && (e.target as HTMLElement)?.tagName!=="SELECT"){
+              e.preventDefault();concluirConfiguracaoCartao();
+            }
+            if(e.key.startsWith("F"))e.preventDefault();
+            return;
+          }
           if(e.key==="Escape"){e.preventDefault();if(vendaConfirmada){novaVendaAposConfirmacao();}else fecharPagamento();return;}
           if(modalOperacao==="pagamento"){
             if(e.key==="F1"){e.preventDefault();focarPagamento("dinheiro");}
             if(e.key==="F2"){e.preventDefault();focarPagamento("pix");}
-            if(e.key==="F3"){e.preventDefault();focarPagamento("cartao");}
+            if(e.key==="F3"){e.preventDefault();selecionarModalidadeCartao("debito");focarPagamento("cartao_debito");}
+            if(e.key==="F4"){e.preventDefault();selecionarModalidadeCartao("credito");focarPagamento("cartao_credito");}
             if(e.key==="F6"){e.preventDefault();focarPagamento("desconto");}
             if(e.key==="F12"){e.preventDefault();if(vendaConfirmada)imprimirCupom();else void confirmarPagamento();}
           }
@@ -957,7 +991,7 @@ export default function PDV() {
       if (e.key === "Escape") {
          e.preventDefault();
          if (abertura) { setAbertura(null);setErroCaixa(""); }
-         else sairPDV();
+         else if(perfilFuncionario==="administrador")sairPDV();
        }
       if (abertura) return;
        if (e.key === "F3") { e.preventDefault(); document.getElementById("ev-cliente-inicial")?.focus(); }
@@ -966,7 +1000,7 @@ export default function PDV() {
     };
     window.addEventListener("keydown", atalho);
     return () => window.removeEventListener("keydown", atalho);
-  }, [telaVenda, abertura, empresaId, usuarioId, processandoCaixa, carrinho, itemSelecionado, produtoPendente, tipoBusca, modalCliente, modalPesquisa, cadastroRapido, modalOperacao, abaBuscaRapida, indiceRapido, produtosRapidos, clientesRapidos, pagamentos, descontoPagamento, vendaConfirmada, operacaoEnviada, finalizandoVenda, historicoAberto, historicoDetalhe, correcaoVenda, correcaoSalvando, cancelamentoAberto, cancelamentoSalvando, trocaPDVFinalizar, trocaPDVBuscaAberta, trocaPDVCatalogoAberto, turno, fechamentoAberto, fechamentoEnviando, consultaProdutosAberta, movCaixaTipo, trocaPDVAtiva, vendaConfirmada, modalOperacao]);
+  }, [telaVenda, abertura, empresaId, usuarioId, processandoCaixa, carrinho, itemSelecionado, produtoPendente, tipoBusca, modalCliente, modalPesquisa, cadastroRapido, modalOperacao, abaBuscaRapida, indiceRapido, produtosRapidos, clientesRapidos, pagamentos, descontoPagamento, vendaConfirmada, operacaoEnviada, finalizandoVenda, historicoAberto, historicoDetalhe, correcaoVenda, correcaoSalvando, cancelamentoAberto, cancelamentoSalvando, trocaPDVFinalizar, trocaPDVBuscaAberta, trocaPDVCatalogoAberto, turno, fechamentoAberto, fechamentoEnviando, consultaProdutosAberta, movCaixaTipo, trocaPDVAtiva, vendaConfirmada, modalOperacao, perfilFuncionario, configurandoCartao]);
 
   useEffect(() => {
     let ativo = true;
@@ -990,11 +1024,14 @@ export default function PDV() {
         });
         if(!resposta.ok)throw new Error("Não foi possível identificar o funcionário.");
         const dados=await resposta.json();
-        const funcionario=(dados.usuarios||[]).find((f:{id:string;ativo:boolean;nome:string})=>f.id===funcionarioId&&f.ativo);
+        const funcionario=(dados.usuarios||[]).find((f:{id:string;ativo:boolean;nome:string;papel:string})=>f.id===funcionarioId&&f.ativo);
         if(!funcionario||String(dados.empresaId)!==empresaSelecionada){
           window.location.replace("/selecionar-usuario");return;
         }
-        if(ativo)setOperador(funcionario.nome);
+        if(ativo){
+          setOperador(funcionario.nome);
+          setPerfilFuncionario(funcionario.papel === "administrador" ? "administrador" : "vendedor");
+        }
       }catch(e){
         if(ativo){setErro(e instanceof Error?e.message:"Falha ao identificar operador.");setCarregando(false);}
         return;
@@ -1006,7 +1043,7 @@ export default function PDV() {
       const id = vinculo[0].empresa_id;
       setEmpresaId(id);
       const [consulta, dadosEmpresa] = await Promise.all([
-        supabase.from("produtos").select("id,codigo,descricao,codigo_barras,preco_custo,preco_venda,estoque_atual,ativo").eq("empresa_id", id).eq("ativo", true).order("descricao").limit(1000),
+        carregarProdutosAtivos(supabase,id,"id,codigo,descricao,codigo_barras,preco_custo,preco_venda,estoque_atual,ativo"),
         supabase.from("empresas").select("*").eq("id", id).single()
       ]);
       if (!ativo) return;
@@ -1027,25 +1064,48 @@ export default function PDV() {
   const total = carrinho.reduce((s, l) => s + Number(l.produto.preco_venda) * l.quantidade, 0);
   const unidades = carrinho.reduce((s, l) => s + l.quantidade, 0);
   const totalCentavos = Math.round(total*100);
-  const descontoCentavos = centavos(descontoPagamento);
+  const descontoCentavos = descontoTipo === "percentual"
+    ? Math.round(totalCentavos * (Number(descontoPagamento.replace(",",".")) || 0) / 100)
+    : centavos(descontoPagamento);
   const totalPagarCentavos = Math.max(0,totalCentavos-descontoCentavos);
-  const pagoCentavos = Object.values(pagamentos).reduce((a,v)=>a+centavos(v),0);
+  const pagoCentavos = centavos(pagamentos.dinheiro)+centavos(pagamentos.pix)+centavos(pagamentos.debito)+centavos(pagamentos.credito);
   const restanteCentavos = Math.max(0,totalPagarCentavos-pagoCentavos);
   const trocoCentavos = Math.min(centavos(pagamentos.dinheiro),Math.max(0,pagoCentavos-totalPagarCentavos));
-  const pagamentosNaoDinheiro = centavos(pagamentos.pix)+centavos(pagamentos.cartao);
-  const valoresValidos = [pagamentos.dinheiro,pagamentos.pix,pagamentos.cartao,descontoPagamento].every(v=>!v.trim()||/^(?:\d+)(?:[.,]\d{1,2})?$/.test(v.trim()));
-  const pagamentoValido = carrinho.length>0 && valoresValidos && descontoCentavos<=totalCentavos && pagoCentavos>=totalPagarCentavos && pagamentosNaoDinheiro<=totalPagarCentavos && trocoCentavos===pagoCentavos-totalPagarCentavos;
-  function alterarPagamento(campo:"dinheiro"|"pix"|"cartao",valor:string){
+  const pagamentosNaoDinheiro = centavos(pagamentos.pix)+centavos(pagamentos.debito)+centavos(pagamentos.credito);
+  const valoresValidos = [pagamentos.dinheiro,pagamentos.pix,pagamentos.debito,pagamentos.credito,descontoPagamento].every(v=>!v.trim()||/^(?:\d+)(?:[.,]\d{1,2})?$/.test(v.trim())) && (descontoTipo!=="percentual" || Number(descontoPagamento.replace(",","."))<=100);
+  const pagamentoValido = carrinho.length>0 && valoresValidos && descontoCentavos<=totalCentavos && pagoCentavos>=totalPagarCentavos && pagamentosNaoDinheiro<=totalPagarCentavos && trocoCentavos===pagoCentavos-totalPagarCentavos && (centavos(pagamentos.debito)===0||cartoesConfigurados.debito) && (centavos(pagamentos.credito)===0||cartoesConfigurados.credito);
+  function alterarPagamento(campo:"dinheiro"|"pix"|"cartao"|"debito"|"credito",valor:string){
     if(operacaoEnviada)return;
     setErroPagamento("");
     if(!/^[\d.,]*$/.test(valor))return;
     setPagamentos(atual=>({...atual,[campo]:valor}));
+    // Ao alterar o valor de um cartão, a configuração precisa ser reconfirmada.
+    // Evita usar bandeira/parcelas antigas sem revisão do operador.
+    if((campo==="debito"||campo==="credito") && valor!==pagamentos[campo]){
+      setCartoesConfigurados(atual=>({...atual,[campo]:false}));
+    }
+  }
+  function selecionarModalidadeCartao(modalidade:"debito"|"credito"){
+    if(operacaoEnviada)return;
+    setCartaoModalidade(modalidade);
+    setErroPagamento("");
+    // Débito e crédito têm valores e bandeiras independentes.
+  }
+  function abrirConfiguracaoCartao(tipo:"debito"|"credito"){
+    if(operacaoEnviada || centavos(pagamentos[tipo])<=0)return;
+    setConfigurandoCartao(tipo);
+  }
+  function concluirConfiguracaoCartao(){
+    if(!configurandoCartao)return;
+    setCartoesConfigurados(atual=>({...atual,[configurandoCartao]:true}));
+    setConfigurandoCartao(null);
   }
   function focarPagamento(campo:string){window.requestAnimationFrame(()=>pagamentoRefs.current[campo]?.focus());}
-  function abrirPagamento(){if(trocaPDVAtiva){setTrocaPDVFinalizar(true);return;}setErroPagamento("");setModalOperacao("pagamento");}
-  function fecharPagamento(){if(finalizandoRef.current || operacaoEnviada)return;setModalOperacao(null);}
+  function abrirPagamento(){if(caixaEmConferencia||verificandoConferencia){setErro(avisoConferencia);return;}if(trocaPDVAtiva){setTrocaPDVFinalizar(true);return;}setErroPagamento("");setModalOperacao("pagamento");}
+  function fecharPagamento(){if(finalizandoRef.current || operacaoEnviada)return;setConfigurandoCartao(null);setModalOperacao(null);}
   async function confirmarPagamento(){
-    if(finalizandoRef.current || vendaConfirmada || !pagamentoValido || !supabase || !empresaId || !turno)return;
+    if(finalizandoRef.current || configurandoCartao || vendaConfirmada || !pagamentoValido || !supabase || !empresaId || !turno)return;
+    try{if(await verificarConferencia(turno.id)){setErroPagamento(avisoConferencia);return;}}catch(e){setErroPagamento(e instanceof Error?e.message:"Não foi possível verificar o turno.");return;}
     if(!chaveVendaRef.current)chaveVendaRef.current=crypto.randomUUID();
     finalizandoRef.current=true;
     setFinalizandoVenda(true);
@@ -1058,7 +1118,9 @@ export default function PDV() {
         p_cliente_id:clienteSelecionado?.id ? String(clienteSelecionado.id) : null,
         p_chave_operacao:chaveVendaRef.current,
         p_itens:carrinho.map(l=>({produto_id:l.produto.id,quantidade:l.quantidade})),
-        p_pagamentos:{dinheiro:centavos(pagamentos.dinheiro)/100,pix:centavos(pagamentos.pix)/100,cartao:centavos(pagamentos.cartao)/100},
+        p_pagamentos:{dinheiro:centavos(pagamentos.dinheiro)/100,pix:centavos(pagamentos.pix)/100,cartao:0,
+          cartoes:{...(centavos(pagamentos.debito)>0?{debito:{valor:centavos(pagamentos.debito)/100,bandeira:bandeiraDebito,parcelas:1}}:{}),
+            ...(centavos(pagamentos.credito)>0?{credito:{valor:centavos(pagamentos.credito)/100,bandeira:bandeiraCredito,parcelas:cartaoParcelas}}:{})}},
         p_desconto:descontoCentavos/100
       });
       if(error){
@@ -1074,7 +1136,7 @@ export default function PDV() {
          desconto:Number(data.desconto ?? descontoCentavos/100),data:new Date().toLocaleString("pt-BR"),
          itens:carrinho.map(l=>({descricao:l.produto.descricao,quantidade:l.quantidade,preco:Number(l.produto.preco_venda)})),
          cliente:clienteSelecionado?nomeCliente(clienteSelecionado):"Consumidor não identificado",
-         pagamentos:{dinheiro:centavos(pagamentos.dinheiro)/100,pix:centavos(pagamentos.pix)/100,cartao:centavos(pagamentos.cartao)/100}
+         pagamentos:{dinheiro:centavos(pagamentos.dinheiro)/100,pix:centavos(pagamentos.pix)/100,cartao:(centavos(pagamentos.debito)+centavos(pagamentos.credito))/100}
        });
     }catch(e){
       const mensagem = e instanceof Error ? e.message : "Falha na finalização";
@@ -1144,7 +1206,8 @@ export default function PDV() {
       .rodape{text-align:center;font-size:11px;font-weight:700;margin-top:2px}
       @media screen{body{margin:12px auto;padding:3mm;box-shadow:0 0 8px #aaa;min-height:150px;width:80mm}}
       @media print{body{width:76mm;margin:0;padding:0}}
-      </style></head><body>
+  
+    </style></head><body>
       <div class="empresa"><h1>${escapar(empresa)}</h1>${cabecalho}</div>
       <div class="separador"></div>
       <div class="linha"><strong>VENDA ${String(v.numero).padStart(6,"0")}</strong><span>${escapar(dataVenda)}</span></div>
@@ -1165,7 +1228,7 @@ export default function PDV() {
   function novaVendaAposConfirmacao(){
     if(!vendaConfirmada || finalizandoRef.current)return;
     setCarrinho([]);setItemSelecionado(null);setBusca("");setClienteSelecionado(null);setClienteBusca("");
-    setPagamentos({dinheiro:"",pix:"",cartao:""});setDescontoPagamento("");
+    setConfigurandoCartao(null);setCartoesConfigurados({debito:false,credito:false});setPagamentos({dinheiro:"",pix:"",cartao:"",debito:"",credito:""});setDescontoPagamento("");setDescontoTipo("valor");setCartaoModalidade("debito");setCartaoBandeira("visa");setBandeiraDebito("visa");setBandeiraCredito("visa");setCartaoParcelas(1);
     setVendaConfirmada(null);setErroPagamento("");setOperacaoEnviada(false);chaveVendaRef.current=null;
     setModalOperacao(null);setTelaVenda(false);
   }
@@ -1234,6 +1297,7 @@ export default function PDV() {
 
 
   function sairPDV(){
+    if(perfilFuncionario!=="administrador")return;
     if(window.confirm("Deseja sair do PDV e voltar ao painel? O turno de caixa permanecerá aberto."))window.location.assign("/dashboard");
   }
 
@@ -1261,13 +1325,13 @@ export default function PDV() {
     {abertura && <div className="ev-turno-overlay">
       <section className="ev-turno-modal" role="dialog" aria-modal="true" aria-label="Abertura do turno de caixa">
         {abertura==="pergunta" ? <>
-          <header><div><small>EVOLUX · GESTÃO DO CAIXA</small><h2>ABERTURA DO TURNO DE CAIXA</h2></div><button type="button" className="ev-turno-fechar" onClick={()=>{setAbertura(null);setErroCaixa("")}} aria-label="Fechar">×</button></header>
+          <header><div><h2>Abertura do Turno de Caixa</h2></div><button type="button" className="ev-turno-fechar" onClick={()=>{setAbertura(null);setErroCaixa("")}} aria-label="Fechar">×</button></header>
           <div className="ev-turno-conteudo">
-            <div className="ev-turno-pergunta"><span className="ev-turno-icone">?</span><p><strong>Prezado usuário,</strong> o turno de caixa ainda não foi aberto. Deseja efetuar a abertura agora?</p></div>
+            <div className="ev-turno-pergunta"><p>O turno de caixa ainda não foi aberto. Deseja realizar a abertura agora?</p></div>
             <div className="ev-turno-acoes"><button type="button" autoFocus onClick={()=>{setDataAbertura(new Date().toLocaleString("pt-BR"));setErroCaixa("");setAbertura("formulario")}}>Sim, abrir caixa (Enter)</button><button type="button" onClick={()=>{setAbertura(null);setErroCaixa("")}}>Não (Esc)</button></div>
           </div>
         </> : <>
-          <header><div><small>EVOLUX · GESTÃO DO CAIXA</small><h2>ABERTURA DO TURNO</h2></div><button type="button" className="ev-turno-fechar" disabled={processandoCaixa} onClick={()=>{setAbertura(null);setErroCaixa("")}} aria-label="Fechar">×</button></header>
+          <header><div><h2>Abertura do Turno de Caixa</h2></div><button type="button" className="ev-turno-fechar" disabled={processandoCaixa} onClick={()=>{setAbertura(null);setErroCaixa("")}} aria-label="Fechar">×</button></header>
           <div className="ev-turno-conteudo">
             <div className="ev-turno-campos"><div><small>Turno</small><strong>Próximo turno</strong></div><div><small>Data da abertura</small><strong>{dataAbertura}</strong></div><div><small>Operador</small><strong>{operador}</strong></div></div>
             <form onSubmit={e=>{e.preventDefault();void abrirCaixa()}}>
@@ -1284,30 +1348,42 @@ export default function PDV() {
 
     <header className="ev-novo-topo">
       <div className="ev-novo-marca"><div className="ev-novo-simbolo">E</div><div><strong>EVOLU<span>X</span></strong><small>GESTÃO EMPRESARIAL • PDV</small></div></div>
-      <div className="ev-novo-turno"><button type="button" onClick={()=>{sessionStorage.removeItem('evolux_funcionario_validado');sessionStorage.removeItem('evolux_empresa_selecionada');window.location.assign('/selecionar-usuario')}} style={{background:"#fff",color:"#102c58",border:"1px solid #cbd9e9",borderRadius:9,padding:"9px 12px",fontWeight:700,cursor:"pointer"}}>Trocar usuário</button><span className="ev-novo-status"><i/> {turno ? "Caixa aberto" : "Caixa não iniciado"}</span><span>Terminal 01 • {turno ? `Turno ${String(turno.numero).padStart(2,"0")}` : "Sem turno"} • {operador}</span><strong>{hora || "--:--:--"}</strong></div>
+      <div className="ev-novo-turno"><button type="button" onClick={()=>{sessionStorage.removeItem('evolux_funcionario_validado');sessionStorage.removeItem('evolux_empresa_selecionada');window.location.assign('/selecionar-usuario')}} style={{background:"#fff",color:"#102c58",border:"1px solid #cbd9e9",borderRadius:9,padding:"9px 12px",fontWeight:700,cursor:"pointer"}}>Trocar usuário</button>{perfilFuncionario==="administrador"&&<button type="button" className="ev-novo-sair ev-novo-sair-topo" onClick={sairPDV} aria-label="Sair do PDV e voltar ao painel"><span aria-hidden="true">↪</span> Sair do PDV <kbd>Esc</kbd></button>}<span className="ev-novo-status"><i/> {turno ? "Caixa aberto" : "Caixa não iniciado"}</span><span>Terminal 01 • {turno ? `Turno ${String(turno.numero).padStart(2,"0")}` : "Sem turno"} • {operador}</span><strong>{hora || "--:--:--"}</strong></div>
     </header>
-    <div className="ev-novo-conteudo">
-      <div className="ev-novo-titulo"><div><small>PAINEL DO OPERADOR</small><h1>Caixa Livre</h1><p>{dataExtenso}</p></div><button type="button" className="ev-novo-sair" onClick={sairPDV}><span>↪</span> Sair do PDV <kbd>Esc</kbd></button></div>
-      <div className="ev-novo-grid">
+    <div className="ev-novo-conteudo ev-m2-conteudo">
+      <section className="ev-m2-hero" aria-label="Resumo do caixa">
+        <div className="ev-m2-hero-title"><span className="ev-m2-hero-icon" aria-hidden="true">▣</span><div><small>PAINEL DO OPERADOR</small><h1>Caixa Livre</h1><p>{dataExtenso}</p></div></div>
+        <div className="ev-m2-metrics">
+          <div className="ev-m2-metric"><span aria-hidden="true">♙</span><div><small>Operador</small><strong>{operador}</strong></div></div>
+          <div className="ev-m2-metric"><span aria-hidden="true">▱</span><div><small>Turno</small><strong>{turno?`Nº ${turno.numero}`:"Não aberto"}</strong></div></div>
+          <div className="ev-m2-metric"><span aria-hidden="true">▦</span><div><small>Data</small><strong>{dataAtual||"—"}</strong></div></div>
+          <div className="ev-m2-metric"><span aria-hidden="true">◷</span><div><small>Situação</small><strong>{turno?(verificandoConferencia?"Verificando...":caixaEmConferencia?"Em conferência":"Caixa aberto"):"Caixa fechado"}</strong></div></div>
+        </div>
+      </section>
+      
+      {turno&&(caixaEmConferencia||verificandoConferencia)&&<p role="alert" style={{padding:"15px 20px",borderRadius:12,background:"#fff0f0",color:"#a31d1d",fontWeight:700,margin:"16px 0"}}>{verificandoConferencia?"Verificando a situação do caixa. Aguarde...":avisoConferencia}</p>}
+      <div className="ev-novo-grid ev-m2-grid">
         <section className="ev-novo-principal">
-          <div className="ev-novo-card ev-novo-operador"><div className="ev-novo-card-titulo"><span>⚙</span><strong>Preparar atendimento</strong></div><div className="ev-novo-campos"><label>Modo de lançamento <small>F11</small><select id="ev-modo-inicial" value={modo} onChange={e=>setModo(e.target.value)}><option>1 - VENDA</option></select></label><label>Operador <small>F12</small><select id="ev-operador-inicial" value={operador} disabled><option value={operador}>{operador}</option></select></label></div><label className="ev-novo-busca">Buscar cliente <small>F3 • CPF/CNPJ, código ou telefone</small><div><input id="ev-cliente-inicial" value={clienteBusca} onChange={e=>setClienteBusca(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();void iniciarVenda()}}} placeholder="Informe o cliente ou deixe em branco"/><button type="button" onClick={()=>void iniciarVenda()} title="Iniciar venda">Continuar →</button></div></label></div>
-          <button type="button" onClick={()=>void abrirConsultaProdutos()} style={{display:"flex",width:"100%",alignItems:"center",gap:16,background:"#1763b6",color:"#fff",border:0,borderRadius:13,padding:"20px 22px",marginTop:15,marginBottom:12,textAlign:"left",cursor:"pointer",boxShadow:"0 8px 18px #1763b625"}}>
-            <span aria-hidden="true" style={{fontSize:31,background:"#ffffff20",borderRadius:10,padding:"8px 12px"}}>⌕</span>
-            <span style={{display:"flex",flexDirection:"column",gap:4,flex:1}}><strong style={{fontSize:19}}>CONSULTAR PRODUTOS</strong><small>Consultar preço de venda e estoque disponível</small></span>
-            <kbd style={{border:"1px solid #ffffff80",borderRadius:5,padding:"4px 7px"}}>F4</kbd>
-          </button>
-          {!turno&&<button type="button" disabled={processandoCaixa||!!abertura} onClick={()=>void iniciarVenda()} style={{width:"100%",border:"1px solid #cbd9e9",background:"#fff",color:"#102c58",borderRadius:10,padding:12,marginBottom:10,fontWeight:700,cursor:"pointer"}}>Abrir caixa</button>}
-          {turno&&<button type="button" disabled={fechamentoCarregando||fechamentoEnviando} onClick={()=>void abrirFechamento()} title="Fechar caixa (F10)" style={{width:"100%",border:"1px solid #b91c1c",background:"#b91c1c",color:"#fff",borderRadius:12,padding:"15px 18px",fontWeight:800,fontSize:16,cursor:"pointer"}}>Fechar caixa (F10) — Turno {turno.numero}</button>}
-          <button type="button" className="ev-novo-iniciar" disabled={processandoCaixa||!!abertura} onClick={()=>void iniciarVenda()}><span className="ev-novo-carrinho">🛒</span><span><strong>INICIAR NOVA VENDA</strong><small>Comece um atendimento no caixa</small></span><kbd>F2</kbd></button>
-          <p className="ev-novo-dica">O fechamento exige contagem cega e aprovação do supervisor. Sair do PDV não encerra o turno.</p>
+          <div className="ev-novo-card ev-novo-operador">
+            <div className="ev-novo-card-titulo"><span>⚙</span><div><strong>Preparar atendimento</strong><small>Configure a venda e identifique o cliente.</small></div></div>
+            <div className="ev-novo-campos">
+              <label>Modo de lançamento <small>F11</small><select id="ev-modo-inicial" value={modo} onChange={e=>setModo(e.target.value)}><option>1 - VENDA</option></select></label>
+              <label>Operador <small>F12</small><select id="ev-operador-inicial" value={operador} disabled><option value={operador}>{operador}</option></select></label>
+            </div>
+            <label className="ev-novo-busca">Buscar cliente <small>F3 • CPF/CNPJ, código ou telefone</small><div><input id="ev-cliente-inicial" value={clienteBusca} onChange={e=>setClienteBusca(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();void iniciarVenda()}}} placeholder="Informe o cliente ou deixe em branco"/><button type="button" onClick={()=>void iniciarVenda()} title="Iniciar venda">Continuar →</button></div></label>
+          </div>
+          <button type="button" className="ev-m2-action ev-m2-consulta" onClick={()=>void abrirConsultaProdutos()}><span className="ev-m2-action-icon" aria-hidden="true">⌕</span><span className="ev-m2-action-copy"><strong>CONSULTAR PRODUTOS</strong><small>Consultar preço de venda e estoque disponível</small></span><kbd>F4</kbd></button>
+          {turno?<button type="button" className="ev-m2-action ev-m2-fechar" disabled={fechamentoCarregando||fechamentoEnviando} onClick={()=>void abrirFechamento()} title="Fechar caixa (F10)"><span className="ev-m2-action-icon" aria-hidden="true">▣</span><span className="ev-m2-action-copy"><strong>FECHAMENTO DE CAIXA</strong><small>Contagem cega do turno {turno.numero} e envio à supervisão</small></span><kbd>F10</kbd></button>:<button type="button" className="ev-m2-action ev-m2-abrir" disabled={processandoCaixa||!!abertura||caixaEmConferencia||verificandoConferencia} onClick={()=>void iniciarVenda()}><span className="ev-m2-action-icon" aria-hidden="true">▣</span><span className="ev-m2-action-copy"><strong>ABRIR CAIXA</strong><small>Informe o saldo inicial para começar o turno</small></span><kbd>↵</kbd></button>}
+          <button type="button" className="ev-novo-iniciar ev-m2-action" disabled={processandoCaixa||!!abertura||caixaEmConferencia||verificandoConferencia} onClick={()=>void iniciarVenda()}><span className="ev-novo-carrinho ev-m2-action-icon" aria-hidden="true">🛒</span><span className="ev-m2-action-copy"><strong>INICIAR NOVA VENDA</strong><small>Comece um atendimento no caixa</small></span><kbd>F2</kbd></button>
         </section>
-        <section className="ev-novo-lateral"><div className="ev-novo-secao"><div><small>GESTÃO DO CAIXA</small><h2>Operações e consultas</h2></div><p>Consulte vendas reais do turno e do dia, com produtos e pagamentos.</p></div><div className="ev-novo-acoes">
-          <button type="button" onClick={abrirHistorico} title="Consultar vendas registradas"><span className="ev-novo-icone">▤</span><span><strong>Consulta de vendas</strong><small>Consultar turno e vendas do dia</small></span><em>Consultar</em></button>
-          <button type="button" onClick={abrirCancelamentos} title="Localizar venda para cancelamento"><span className="ev-novo-icone">⇄</span><span><strong>Cancelamento de venda</strong><small>Localizar venda original</small></span><em>Acessar</em></button>
-          <button type="button" onClick={()=>abrirMovCaixa("sangria")} title="Retirar dinheiro da gaveta"><span className="ev-novo-icone">−</span><span><strong>Sangria</strong><small>Retirada de dinheiro do turno</small></span><em>Registrar</em></button>
-          <button type="button" onClick={()=>abrirMovCaixa("suprimento")} title="Adicionar dinheiro à gaveta"><span className="ev-novo-icone">+</span><span><strong>Suprimento</strong><small>Entrada de dinheiro no turno</small></span><em>Registrar</em></button>
+        <section className="ev-novo-lateral"><div className="ev-novo-secao"><div className="ev-m2-side-heading"><span aria-hidden="true">▱</span><div><h2>Gestão do Caixa</h2><p>Operações e consultas do turno</p></div></div></div><div className="ev-novo-acoes">
+          <button type="button" onClick={abrirHistorico} title="Consultar vendas registradas"><span className="ev-novo-icone">▤</span><span><strong>Consulta de vendas</strong><small>Consultar turno e vendas do dia</small></span><em>Consultar →</em></button>
+          <button type="button" onClick={abrirCancelamentos} title="Localizar venda para cancelamento"><span className="ev-novo-icone">⇄</span><span><strong>Cancelamento de venda</strong><small>Localizar venda original</small></span><em>Acessar →</em></button>
+          <button type="button" onClick={()=>abrirMovCaixa("sangria")} title="Retirar dinheiro da gaveta"><span className="ev-novo-icone">−</span><span><strong>Sangria</strong><small>Retirada de dinheiro do turno</small></span><em>Registrar →</em></button>
+          <button type="button" onClick={()=>abrirMovCaixa("suprimento")} title="Adicionar dinheiro à gaveta"><span className="ev-novo-icone">+</span><span><strong>Suprimento</strong><small>Entrada de dinheiro no turno</small></span><em>Registrar →</em></button>
         </div></section>
       </div>
+      <p className="ev-novo-dica ev-m2-notice"><span aria-hidden="true">ⓘ</span> O fechamento exige contagem cega e aprovação do supervisor. Sair do PDV não encerra o turno.</p>
     </div>
     {movCaixaTipo&&<div className="ev-hist-fundo"><section className="ev-hist-modal" role="dialog" aria-modal="true" aria-label="Movimentação de caixa">
       <header className="ev-hist-topo"><div><small>EVOLUX • GESTÃO DO CAIXA</small><h2>{movCaixaTipo==="sangria"?"Sangria de Caixa":"Suprimento de Caixa"}</h2></div><button type="button" disabled={movCaixaSalvando} onClick={()=>setMovCaixaTipo(null)}>✕ Fechar</button></header>
@@ -1336,7 +1412,7 @@ export default function PDV() {
           <h3>Resultados da consulta ({cancelamentoResultados.length})</h3>
           {cancelamentoLimite&&<p className="ev-hist-aviso">Exibindo as 500 vendas mais recentes dos filtros. Refine a data, o caixa ou o recibo.</p>}
           {cancelamentoResultados.length?<div className="ev-canc-tabela"><table><thead><tr><th>Recibo</th><th>Data e hora</th><th>Turno</th><th>Valor</th><th>Pagamento</th><th>Situação</th><th></th></tr></thead><tbody>
-          {cancelamentoResultados.map(v=>{const t=cancelamentoTurnos.find(t=>String(t.id)===String(v.caixa_turno_id));return <tr key={String(v.id)}><td>#{historicoNumero(v)}</td><td>{historicoHorario(v)}</td><td>{t?`Turno ${String(t.numero||"—")}`:"—"}</td><td>{dinheiro(historicoValor(v,"total"))}</td><td>{formaCancelamento(v)}</td><td>{String(v.situacao)==="concluida"?"Concluída":"Cancelada"}</td><td><button type="button" onClick={()=>void selecionarVendaCancelamento(v)} disabled={cancelamentoCarregando||cancelamentoSalvando||trocaSalvando||String(v.situacao)!=="concluida"} style={{background:String(v.situacao)==="concluida"?"#b42318":"#cbd5e1",color:"#fff",border:"1px solid #9f1d16",borderRadius:8,padding:"9px 14px",fontWeight:700,cursor:String(v.situacao)==="concluida"?"pointer":"not-allowed"}} aria-label={`Cancelar venda número ${historicoNumero(v)}`}>{String(v.situacao)==="concluida"?"Cancelar":"Cancelada"}</button></td></tr>;})}
+          {cancelamentoResultados.map(v=>{const t=cancelamentoTurnos.find(t=>String(t.id)===String(v.caixa_turno_id));return <tr key={String(v.id)}><td>#{historicoNumero(v)}{String(v.situacao)==="cancelada"&&<span style={{display:"block",color:"#a21d2b",fontWeight:700,fontSize:11}}>CANCELADA</span>}</td><td>{historicoHorario(v)}</td><td>{t?`Turno ${String(t.numero||"—")}`:"—"}</td><td>{dinheiro(historicoValor(v,"total"))}</td><td>{formaCancelamento(v)}</td><td>{String(v.situacao)==="concluida"?"Concluída":"Cancelada"}</td><td><button type="button" onClick={()=>void selecionarVendaCancelamento(v)} disabled={cancelamentoCarregando||cancelamentoSalvando||trocaSalvando||String(v.situacao)!=="concluida"} style={{background:String(v.situacao)==="concluida"?"#b42318":"#cbd5e1",color:"#fff",border:"1px solid #9f1d16",borderRadius:8,padding:"9px 14px",fontWeight:700,cursor:String(v.situacao)==="concluida"?"pointer":"not-allowed"}} aria-label={`Cancelar venda número ${historicoNumero(v)}`}>{String(v.situacao)==="concluida"?"Cancelar":"Cancelada"}</button></td></tr>;})}
           </tbody></table></div>:<p className="ev-hist-aviso">Nenhuma venda encontrada com esses filtros.</p>}
         </div>}
         {cancelamentoErro&&<p className="ev-hist-erro" role="alert">{cancelamentoErro}</p>}
@@ -1364,15 +1440,15 @@ export default function PDV() {
         <div className="ev-hist-resumo"><div><small>Data e hora</small><strong>{historicoHorario(historicoDetalhe)}</strong></div><div><small>Total</small><strong>{dinheiro(historicoValor(historicoDetalhe,"total","valor_total"))}</strong></div><div><small>Recibo</small><strong>#{historicoNumero(historicoDetalhe)}</strong></div></div>
         {historicoDetalheCarregando&&<p>Consultando itens e pagamentos...</p>}
         {historicoDetalheErro&&<p role="alert" className="ev-hist-erro">{historicoDetalheErro}</p>}
-        {!historicoDetalheCarregando&&!historicoDetalheErro&&<><h3>Produtos vendidos</h3><div className="ev-hist-lista">{historicoItens.map((item,i)=><div className="ev-hist-item" key={String(item.id||i)}><strong>{String(item.descricao_exibicao||"Produto")}</strong><span>{historicoValor(item,"quantidade","qtd")} × {dinheiro(historicoValor(item,"preco_unitario","preco_venda","preco"))} = {dinheiro(historicoValor(item,"subtotal","total","valor_total")||historicoValor(item,"quantidade","qtd")*historicoValor(item,"preco_unitario","preco_venda","preco"))}</span></div>)}{!historicoItens.length&&<p>Nenhum item disponível para esta venda.</p>}</div><h3>Formas de pagamento</h3><div className="ev-hist-lista">{historicoPagamentos.map((pag,i)=><div className="ev-hist-pag" key={String(pag.id||i)}><span>{String(historicoCampo(pag,"forma","forma_pagamento","tipo","metodo")||"Pagamento")}</span><strong>{dinheiro(historicoValor(pag,"valor","valor_pago","total"))}</strong></div>)}{!historicoPagamentos.length&&<p>Nenhum pagamento disponível.</p>}</div></>}
+        {!historicoDetalheCarregando&&!historicoDetalheErro&&<><h3>Produtos vendidos</h3><div className="ev-hist-lista">{historicoItens.map((item,i)=><div className="ev-hist-item" key={String(item.id||i)}><strong>{String(item.descricao_exibicao||"Produto")}</strong><span>{historicoValor(item,"quantidade","qtd")} × {dinheiro(historicoValor(item,"preco_unitario","preco_venda","preco"))} = {dinheiro(historicoValor(item,"subtotal","total","valor_total")||historicoValor(item,"quantidade","qtd")*historicoValor(item,"preco_unitario","preco_venda","preco"))}</span></div>)}{!historicoItens.length&&<p>Nenhum item disponível para esta venda.</p>}</div><h3>Resumo financeiro</h3><div className="ev-hist-lista"><div className="ev-hist-pag"><span>Subtotal dos produtos</span><strong>{dinheiro(historicoValor(historicoDetalhe,"subtotal","valor_subtotal"))}</strong></div>{historicoValor(historicoDetalhe,"desconto","valor_desconto")>0&&<div className="ev-hist-pag"><span>Desconto concedido</span><strong style={{color:"#b42332"}}>− {dinheiro(historicoValor(historicoDetalhe,"desconto","valor_desconto"))}</strong></div>}<div className="ev-hist-pag"><strong>Total da venda</strong><strong>{dinheiro(historicoValor(historicoDetalhe,"total","valor_total"))}</strong></div></div><h3>Formas de pagamento</h3><div className="ev-hist-lista">{historicoPagamentos.map((pag,i)=><div className="ev-hist-pag" key={String(pag.id||i)}><span>{String(historicoCampo(pag,"forma","forma_pagamento","tipo","metodo")||"Pagamento")}</span><strong>{dinheiro(historicoValor(pag,"valor","valor_pago","total"))}</strong></div>)}{!historicoPagamentos.length&&<p>Nenhum pagamento disponível.</p>}</div></>}
         <p className="ev-hist-aviso">Os pagamentos podem ser corrigidos com justificativa e auditoria. Reimpressão e devoluções serão habilitadas nas próximas etapas.</p>
       </div> : <div className="ev-hist-corpo">
-        <div className="ev-hist-filtros"><div className="ev-hist-abas"><button type="button" className={historicoPeriodo==="turno"?"ativo":""} onClick={()=>setHistoricoPeriodo("turno")}>Turno atual</button><button type="button" className={historicoPeriodo==="hoje"?"ativo":""} onClick={()=>setHistoricoPeriodo("hoje")}>Hoje (todos os turnos)</button></div><input aria-label="Buscar número da venda" value={historicoBusca} onChange={e=>setHistoricoBusca(e.target.value)} placeholder="Pesquisar número do recibo"/><button type="button" onClick={()=>void carregarHistorico()} disabled={historicoCarregando}>↻ Atualizar</button></div>
-        <div className="ev-hist-resumo"><div><small>Vendas encontradas</small><strong>{historicoFiltrado.length}</strong></div><div><small>Total vendido</small><strong>{dinheiro(historicoTotal)}</strong></div><div><small>Período</small><strong>{historicoPeriodo==="turno"?"Turno atual":"Hoje"}</strong></div></div>
+        <div className="ev-hist-filtros"><div className="ev-hist-abas"><button type="button" className={historicoPeriodo==="turno"?"ativo":""} onClick={()=>setHistoricoPeriodo("turno")}>Turno atual</button><button type="button" className={historicoPeriodo==="hoje"?"ativo":""} onClick={()=>setHistoricoPeriodo("hoje")}>Hoje (todos os turnos)</button><button type="button" className={historicoPeriodo==="canceladas"?"ativo":""} onClick={()=>setHistoricoPeriodo("canceladas")}>Vendas canceladas</button></div><input aria-label="Buscar número da venda" value={historicoBusca} onChange={e=>setHistoricoBusca(e.target.value)} placeholder="Pesquisar número do recibo"/><button type="button" onClick={()=>void carregarHistorico()} disabled={historicoCarregando}>↻ Atualizar</button></div>
+        <div className="ev-hist-resumo"><div><small>Vendas encontradas</small><strong>{historicoFiltrado.length}</strong></div><div><small>Total vendido</small><strong>{dinheiro(historicoTotal)}</strong></div><div><small>Período</small><strong>{historicoPeriodo==="turno"?"Turno atual":historicoPeriodo==="hoje"?"Hoje":"Canceladas hoje"}</strong></div></div>
         {historicoErro&&<p className="ev-hist-erro" role="alert">{historicoErro}. Confira as permissões de leitura (RLS) da tabela vendas.</p>}
         {historicoPagamentosErro&&<p className="ev-hist-erro" role="alert">{historicoPagamentosErro}</p>}
         {historicoImpressaoErro&&<p className="ev-hist-erro" role="alert">Reimpressão: {historicoImpressaoErro}</p>}
-        {historicoCarregando?<p>Carregando vendas do Supabase...</p>:<div className="ev-hist-tabela"><table><thead><tr><th>Recibo</th><th>Data e hora</th><th>Valor</th><th>Forma de pagamento</th><th>Ações</th></tr></thead><tbody>{historicoFiltrado.map((v,i)=><tr key={String(v.id||i)}><td>#{historicoNumero(v)}</td><td>{historicoHorario(v)}</td><td>{dinheiro(historicoValor(v,"total","valor_total"))}</td><td className="ev-hist-forma">{formaPagamentoHistorico(v)}</td><td><div className="ev-hist-acoes"><button type="button" onClick={()=>void abrirDetalheHistorico(v)}>Detalhes</button><button type="button" className="ev-hist-corrigir" onClick={()=>void abrirCorrecao(v)}>Alterar pagamento</button><button type="button" className="ev-hist-reimprimir" disabled={historicoImprimindo!==null} onClick={()=>void reimprimirHistorico(v)}>{historicoImprimindo===String(v.id)?"Preparando...":"▣ Reimprimir"}</button></div></td></tr>)}</tbody></table>{!historicoFiltrado.length&&!historicoErro&&<p>Nenhuma venda encontrada para o período selecionado.</p>}</div>}
+        {historicoCarregando?<p>Carregando vendas do Supabase...</p>:<div className="ev-hist-tabela"><table><thead><tr><th>Recibo</th><th>Data e hora</th><th>Valor</th><th>Forma de pagamento</th><th>Ações</th></tr></thead><tbody>{historicoFiltrado.map((v,i)=><tr key={String(v.id||i)}><td>#{historicoNumero(v)}{String(v.situacao)==="cancelada"&&<span style={{display:"block",color:"#a21d2b",fontWeight:700,fontSize:11}}>CANCELADA</span>}</td><td>{historicoHorario(v)}</td><td>{dinheiro(historicoValor(v,"total","valor_total"))}</td><td className="ev-hist-forma">{formaPagamentoHistorico(v)}</td><td><div className="ev-hist-acoes"><button type="button" onClick={()=>void abrirDetalheHistorico(v)}>Detalhes</button><button type="button" className="ev-hist-corrigir" disabled={String(v.situacao)!=="concluida"} onClick={()=>void abrirCorrecao(v)}>Alterar pagamento</button><button type="button" className="ev-hist-reimprimir" disabled={historicoImprimindo!==null||String(v.situacao)!=="concluida"} onClick={()=>void reimprimirHistorico(v)}>{historicoImprimindo===String(v.id)?"Preparando...":"▣ Reimprimir"}</button></div></td></tr>)}</tbody></table>{!historicoFiltrado.length&&!historicoErro&&<p>Nenhuma venda encontrada para o período selecionado.</p>}</div>}
         {historicoVendas.length===1000&&<p className="ev-hist-aviso">A consulta está limitada aos primeiros 1.000 registros. Use um filtro no banco para relatórios completos.</p>}
       </div>}
       {correcaoVenda&&<div className="ev-correcao-fundo"><section className="ev-correcao-modal" role="dialog" aria-modal="true" aria-label="Corrigir forma de pagamento">
@@ -1401,6 +1477,42 @@ export default function PDV() {
     .ev-hist-fundo{position:fixed;inset:0;z-index:3500;background:#0b1e3a99;display:flex;align-items:center;justify-content:center;padding:20px}.ev-hist-modal{width:min(930px,100%);max-height:90dvh;background:#fff;border-radius:17px;box-shadow:0 25px 80px #0005;display:flex;flex-direction:column;overflow:hidden}.ev-hist-topo{display:flex;justify-content:space-between;align-items:center;background:#102b55;color:#fff;padding:18px 24px}.ev-hist-topo small{font-size:10px;letter-spacing:1.5px;color:#bdd2ef}.ev-hist-topo h2{margin:4px 0 0;font-size:23px}.ev-hist-topo button{background:#ffffff1c;color:#fff;border:1px solid #ffffff44;border-radius:8px;padding:10px;cursor:pointer}.ev-hist-corpo{padding:22px;overflow:auto}.ev-hist-filtros{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px}.ev-hist-abas{display:flex;gap:5px}.ev-hist-filtros button,.ev-hist-tabela button{border:1px solid #c9d9ee;border-radius:8px;background:#f0f5fd;padding:10px 12px;color:#163c70;cursor:pointer}.ev-hist-abas .ativo{background:#163e75;color:#fff}.ev-hist-filtros input{border:1px solid #c9d9ee;border-radius:8px;padding:11px;flex:1;min-width:160px}.ev-hist-resumo{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:20px}.ev-hist-resumo>div{border:1px solid #dae5f1;border-radius:11px;padding:14px;background:#f8fafd}.ev-hist-resumo small{display:block;color:#627b99;font-size:11px}.ev-hist-resumo strong{display:block;font-size:19px;margin-top:5px}.ev-hist-tabela{overflow:auto}.ev-hist-tabela table{width:100%;border-collapse:collapse}.ev-hist-tabela th{text-align:left;background:#eff4fa;color:#365678;padding:12px}.ev-hist-tabela td{border-bottom:1px solid #e3eaf3;padding:12px}.ev-hist-tabela td:nth-child(3){font-weight:700}.ev-hist-corpo h3{margin:16px 0 8px}.ev-hist-lista{border:1px solid #dce5f1;border-radius:10px;overflow:hidden}.ev-hist-item,.ev-hist-pag{padding:12px;border-bottom:1px solid #e3eaf3;display:flex;justify-content:space-between;gap:12px}.ev-hist-item{flex-direction:column;gap:4px}.ev-hist-item span{text-align:right}.ev-hist-erro{background:#fff0ee;color:#a32626;padding:12px;border-radius:8px}.ev-hist-aviso{font-size:12px;color:#697c96;margin-top:16px}@media(max-width:600px){.ev-hist-fundo{padding:6px}.ev-hist-modal{max-height:97dvh}.ev-hist-corpo{padding:12px}.ev-hist-resumo{gap:5px}.ev-hist-resumo>div{padding:8px}.ev-hist-resumo strong{font-size:14px}}
     .ev-hist-forma{white-space:nowrap;font-weight:600;color:#355576}.ev-hist-tabela .ev-hist-reimprimir{background:#eef2ff;border-color:#c7d3f5;color:#263f86;font-weight:700;white-space:nowrap}.ev-hist-tabela button:disabled{opacity:.55;cursor:not-allowed}    .ev-hist-acoes{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.ev-hist-tabela .ev-hist-corrigir{background:#e9f7f0;border-color:#b8dec9;color:#12623e;font-weight:700;white-space:nowrap}
     .ev-correcao-fundo{position:absolute;inset:0;z-index:3;background:#07172dc9;display:flex;align-items:center;justify-content:center;padding:12px}.ev-hist-modal{position:relative}.ev-correcao-modal{width:min(550px,100%);max-height:100%;overflow:auto;background:#fff;color:#183253;border-radius:14px;box-shadow:0 18px 55px #0005}.ev-correcao-topo{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:17px 20px;background:#102b55;color:#fff}.ev-correcao-topo small{color:#bdd2ef;font-size:10px;letter-spacing:1px}.ev-correcao-topo h3{margin:4px 0 0;font-size:19px}.ev-correcao-topo button{background:#ffffff20;border:1px solid #ffffff50;border-radius:8px;color:#fff;padding:8px 12px}.ev-correcao-corpo{padding:20px}.ev-correcao-resumo,.ev-correcao-atuais>div,.ev-correcao-soma{display:flex;justify-content:space-between;gap:10px;align-items:center}.ev-correcao-resumo{padding:13px;border:1px solid #dce5f1;background:#f5f8fc;border-radius:9px}.ev-correcao-resumo strong{font-size:21px}.ev-correcao-corpo h4{margin:18px 0 9px;font-size:14px}.ev-correcao-atuais{border:1px solid #dce5f1;border-radius:8px}.ev-correcao-atuais>div{padding:10px 12px;border-bottom:1px solid #e6edf5}.ev-correcao-atuais>div:last-child{border-bottom:0}.ev-correcao-dica{font-size:12px;line-height:1.5;color:#657a96}.ev-correcao-campos{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.ev-correcao-campos label,.ev-correcao-motivo{font-size:12px;font-weight:700;color:#2c496e}.ev-correcao-campos input,.ev-correcao-motivo textarea{display:block;width:100%;margin-top:7px;border:1px solid #cbd9ea;border-radius:8px;padding:10px;color:#193555;font:14px Arial,sans-serif}.ev-correcao-soma{margin:13px 0;padding:12px;border-radius:8px;background:#f3f7fc;font-size:12px;flex-wrap:wrap}.ev-correcao-motivo{display:block;margin-top:14px}.ev-correcao-motivo textarea{resize:vertical}.ev-correcao-botoes{display:flex;justify-content:flex-end;gap:10px;margin-top:17px}.ev-correcao-botoes button{padding:11px 15px;border:1px solid #cbd9ea;background:#f5f8fc;color:#193555;border-radius:8px;font-weight:700}.ev-correcao-botoes .ev-correcao-confirmar{background:#137246;color:white;border-color:#137246}.ev-correcao-sucesso{padding:12px;border-radius:8px;background:#e8f7ee;color:#12623e;font-weight:700}.ev-correcao-modal button:not(:disabled){cursor:pointer}.ev-correcao-modal button:disabled{opacity:.55;cursor:not-allowed}@media(max-width:560px){.ev-correcao-campos{grid-template-columns:1fr}.ev-correcao-corpo{padding:12px}.ev-correcao-soma{display:block}.ev-correcao-soma span{display:block;margin:5px 0}}
+
+    /* EVOLUX Modelo 2 — Caixa Livre. Estilos limitados a esta tela. */
+    .ev-m2-conteudo{width:min(1560px,calc(100% - 48px));padding:20px 0 42px}
+    .ev-m2-hero{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:23px 28px;border-radius:20px;background:linear-gradient(115deg,#0a3b85 0%,#0b2454 75%);color:white;box-shadow:0 12px 26px #0b245421}
+    .ev-m2-hero-title{display:flex;align-items:center;gap:18px;min-width:220px}.ev-m2-hero-icon{display:grid;place-items:center;font-size:39px;color:#fff;width:66px;height:66px;border-right:1px solid #ffffff60;padding-right:13px}
+    .ev-m2-hero-title small{font-size:11px;font-weight:800;letter-spacing:1.5px;color:#d6e9ff}.ev-m2-hero-title h1{font-size:35px;margin:5px 0;line-height:1.08;color:white}.ev-m2-hero-title p{font-size:13px;color:#dce9fa;margin:0;text-transform:capitalize}
+    .ev-m2-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;flex:1;max-width:890px}
+    .ev-m2-metric{display:flex;align-items:center;gap:12px;min-height:76px;padding:12px 15px;border-radius:14px;background:linear-gradient(135deg,#ffffff20,#ffffff0d);border:1px solid #ffffff2e;min-width:0}
+    .ev-m2-metric>span{font-size:28px;flex:none;color:#e6f4ff}.ev-m2-metric small{display:block;color:#e0edff;font-size:12px}.ev-m2-metric strong{display:block;font-size:15px;margin-top:4px;color:white;overflow-wrap:anywhere}
+    .ev-m2-toolbar{display:flex;justify-content:flex-end;margin:13px 0}.ev-m2-toolbar .ev-novo-sair{padding:9px 13px}
+    .ev-novo-turno .ev-novo-sair-topo{padding:8px 11px;gap:6px;white-space:nowrap;font-size:12px;box-shadow:none}.ev-novo-turno .ev-novo-sair-topo>span{font-size:16px}.ev-novo-turno .ev-novo-sair-topo kbd{font-size:10px;padding:3px 5px}@media(max-width:550px){.ev-novo-turno .ev-novo-sair-topo{font-size:12px}.ev-novo-turno .ev-novo-sair-topo kbd{display:none}}
+    .ev-m2-grid{grid-template-columns:minmax(0,1.18fr) minmax(0,.92fr);gap:20px;align-items:stretch}
+    .ev-m2-grid .ev-novo-principal{gap:12px}.ev-m2-grid .ev-novo-card,.ev-m2-grid .ev-novo-lateral{border-radius:20px;border:1px solid #cddff8;box-shadow:0 7px 19px #102b5512;padding:26px}
+    .ev-m2-grid .ev-novo-card-titulo{margin-bottom:19px;align-items:center}.ev-m2-grid .ev-novo-card-titulo>span{font-size:25px;padding:12px 15px;background:linear-gradient(135deg,#5daeff,#0863db);color:white}
+    .ev-m2-grid .ev-novo-card-titulo strong{font-size:21px;color:#0b2454}.ev-m2-grid .ev-novo-card-titulo small{display:block;font-size:12px;font-weight:400;color:#536e90;margin-top:5px}
+    .ev-m2-grid .ev-novo-campos label,.ev-m2-grid .ev-novo-busca{font-size:14px;color:#0b2454}.ev-m2-grid .ev-novo-campos select,.ev-m2-grid .ev-novo-busca input{height:48px;font-size:15px;border-color:#b9d0ed;border-radius:11px}
+    .ev-m2-grid .ev-novo-busca button{height:48px;background:linear-gradient(#0864d9,#073a95);color:#fff;border:0;padding:0 21px;font-size:14px}
+    .ev-m2-action{width:100%;min-height:82px;display:flex;align-items:center;gap:20px;padding:16px 22px;border:0;border-radius:15px;color:white;text-align:left;cursor:pointer;box-shadow:0 9px 20px #123b7520;transition:transform .15s ease,filter .15s ease}
+    .ev-m2-action:hover:not(:disabled){transform:translateY(-1px);filter:brightness(1.06)}.ev-m2-action:disabled{opacity:.55;cursor:not-allowed}
+    .ev-m2-action-icon{display:grid;place-items:center;flex:none;min-width:59px;height:59px;border-radius:12px;background:#ffffff2b;font-size:29px}
+    .ev-m2-action-copy{flex:1;min-width:0}.ev-m2-action-copy strong{display:block;font-size:21px;letter-spacing:.15px}.ev-m2-action-copy small{display:block;margin-top:5px;font-size:12px;color:#fff;opacity:.9}
+    .ev-m2-action kbd{font:800 16px Arial,sans-serif;margin-left:auto;color:#fff;border:1px solid #ffffff80;border-radius:8px;padding:7px 10px;background:#ffffff12}
+    .ev-m2-consulta{background:linear-gradient(110deg,#0761bd,#082e7a)}.ev-m2-fechar{background:linear-gradient(110deg,#e3151f,#ae0713)}.ev-m2-abrir{background:linear-gradient(110deg,#125eaf,#073a7c)}
+    .ev-m2-grid .ev-novo-iniciar{background:linear-gradient(110deg,#008c47,#006132);min-height:82px;padding:16px 22px}
+    .ev-m2-grid .ev-novo-iniciar strong{font-size:21px}.ev-m2-grid .ev-novo-iniciar .ev-m2-action-icon{padding:0}.ev-m2-grid .ev-novo-iniciar kbd{font-size:16px}
+    .ev-m2-side-heading{display:flex;align-items:center;gap:16px;margin-bottom:19px}.ev-m2-side-heading>span{display:grid;place-items:center;background:linear-gradient(135deg,#5daeff,#0863db);color:#fff;border-radius:13px;width:58px;height:58px;font-size:30px;flex:none}
+    .ev-m2-side-heading h2{font-size:24px;color:#0b2454;margin:0}.ev-m2-side-heading p{font-size:13px;color:#496b95;margin:5px 0 0}
+    .ev-m2-grid .ev-novo-acoes{gap:12px}.ev-m2-grid .ev-novo-acoes button{min-height:83px;border-color:#c8dcf7;background:linear-gradient(105deg,#f8fbff,#eef5ff);border-radius:14px;cursor:pointer;padding:14px}
+    .ev-m2-grid .ev-novo-acoes button:hover{border-color:#4389db;background:#edf5ff}.ev-m2-grid .ev-novo-icone{width:53px;height:53px;font-size:28px;color:#0755ad;background:#e2eeff}
+    .ev-m2-grid .ev-novo-acoes strong{font-size:16px;color:#0b2454}.ev-m2-grid .ev-novo-acoes small{font-size:12px;color:#536e90}
+    .ev-m2-grid .ev-novo-acoes em{background:#dbeaff;border:1px solid #c3d9f6;color:#0c3b7b;font-size:12px;font-weight:700;padding:9px 12px}
+    .ev-m2-notice{display:flex;align-items:center;gap:12px;background:#e1efff;border:1px solid #bdd7ff;border-radius:14px;padding:16px 18px;margin:18px 0 0;color:#153e79;font-size:13px}.ev-m2-notice span{font-size:22px;color:#0759b9}
+    @media(max-width:1150px){.ev-m2-hero{flex-direction:column;align-items:stretch}.ev-m2-metrics{max-width:none}.ev-m2-grid{grid-template-columns:1fr}}
+    @media(max-width:700px){.ev-m2-conteudo{width:calc(100% - 24px)}.ev-m2-hero{padding:19px}.ev-m2-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.ev-m2-grid .ev-novo-card,.ev-m2-grid .ev-novo-lateral{padding:17px}.ev-m2-action-copy strong,.ev-m2-grid .ev-novo-iniciar strong{font-size:16px}.ev-m2-action{gap:10px;padding:12px}.ev-m2-action-icon{min-width:46px;height:46px;font-size:24px}.ev-m2-side-heading h2{font-size:21px}}
+    @media(max-width:420px){.ev-m2-metrics{grid-template-columns:1fr}.ev-m2-action kbd{font-size:12px;padding:5px}.ev-m2-grid .ev-novo-acoes em{font-size:10px;padding:6px}}
+
     /* EVOLUX 24.6.6: alinhamento e catálogo de produtos na localização F7 */
     .ev-troca-pdv-dialog{box-sizing:border-box;padding:24px!important;border-radius:14px!important}
     .ev-troca-pdv-dialog>header{display:flex!important;align-items:center!important;justify-content:space-between!important;gap:16px!important;margin-bottom:16px!important}
@@ -1507,7 +1619,7 @@ export default function PDV() {
           <h3>Resultados da consulta ({cancelamentoResultados.length})</h3>
           {cancelamentoLimite&&<p className="ev-hist-aviso">Exibindo as 500 vendas mais recentes dos filtros. Refine a data, o caixa ou o recibo.</p>}
           {cancelamentoResultados.length?<div className="ev-canc-tabela"><table><thead><tr><th>Recibo</th><th>Data e hora</th><th>Turno</th><th>Valor</th><th>Pagamento</th><th>Situação</th><th></th></tr></thead><tbody>
-          {cancelamentoResultados.map(v=>{const t=cancelamentoTurnos.find(t=>String(t.id)===String(v.caixa_turno_id));return <tr key={String(v.id)}><td>#{historicoNumero(v)}</td><td>{historicoHorario(v)}</td><td>{t?`Turno ${String(t.numero||"—")}`:"—"}</td><td>{dinheiro(historicoValor(v,"total"))}</td><td>{formaCancelamento(v)}</td><td>{String(v.situacao)==="concluida"?"Concluída":"Cancelada"}</td><td><button type="button" onClick={()=>void selecionarVendaCancelamento(v)} disabled={cancelamentoCarregando||cancelamentoSalvando||trocaSalvando||String(v.situacao)!=="concluida"} style={{background:String(v.situacao)==="concluida"?"#b42318":"#cbd5e1",color:"#fff",border:"1px solid #9f1d16",borderRadius:8,padding:"9px 14px",fontWeight:700,cursor:String(v.situacao)==="concluida"?"pointer":"not-allowed"}} aria-label={`Cancelar venda número ${historicoNumero(v)}`}>{String(v.situacao)==="concluida"?"Cancelar":"Cancelada"}</button></td></tr>;})}
+          {cancelamentoResultados.map(v=>{const t=cancelamentoTurnos.find(t=>String(t.id)===String(v.caixa_turno_id));return <tr key={String(v.id)}><td>#{historicoNumero(v)}{String(v.situacao)==="cancelada"&&<span style={{display:"block",color:"#a21d2b",fontWeight:700,fontSize:11}}>CANCELADA</span>}</td><td>{historicoHorario(v)}</td><td>{t?`Turno ${String(t.numero||"—")}`:"—"}</td><td>{dinheiro(historicoValor(v,"total"))}</td><td>{formaCancelamento(v)}</td><td>{String(v.situacao)==="concluida"?"Concluída":"Cancelada"}</td><td><button type="button" onClick={()=>void selecionarVendaCancelamento(v)} disabled={cancelamentoCarregando||cancelamentoSalvando||trocaSalvando||String(v.situacao)!=="concluida"} style={{background:String(v.situacao)==="concluida"?"#b42318":"#cbd5e1",color:"#fff",border:"1px solid #9f1d16",borderRadius:8,padding:"9px 14px",fontWeight:700,cursor:String(v.situacao)==="concluida"?"pointer":"not-allowed"}} aria-label={`Cancelar venda número ${historicoNumero(v)}`}>{String(v.situacao)==="concluida"?"Cancelar":"Cancelada"}</button></td></tr>;})}
           </tbody></table></div>:<p className="ev-hist-aviso">Nenhuma venda encontrada com esses filtros.</p>}
         </div>}
         {cancelamentoVenda&&<button type="button" className="ev-canc-voltar" disabled={cancelamentoSalvando||trocaSalvando} onClick={()=>{setCancelamentoVenda(null);setCancelamentoMotivo("");setCancelamentoSucesso("");setCancelamentoErro("");setCancelamentoAutorizado(false);setAdminCancelamentoPin("");setAutorizacaoCancelamentoAberta(false);resetarTroca();}}>← Voltar aos resultados</button>}
@@ -1640,11 +1752,27 @@ export default function PDV() {
         <footer><button type="button" onClick={novaVendaAposConfirmacao}>Não, voltar ao Caixa Livre (Esc)</button><button type="button" onClick={imprimirCupom}>Sim, imprimir cupom (F12)</button></footer>
       </> : <>
         <div className="ev-pag-resumo"><span>TOTAL DA VENDA</span><strong>{dinheiro(total)}</strong></div>
-        <p className="ev-pag-instrucao">INFORME OS VALORES RECEBIDOS — PODE UTILIZAR MAIS DE UMA FORMA</p>
-        <div className="ev-pag-campos">
-          {([{"campo":"dinheiro","rotulo":"DINHEIRO","tecla":"F1"},{"campo":"pix","rotulo":"PIX","tecla":"F2"},{"campo":"cartao","rotulo":"CARTÃO CRÉDITO/DÉBITO","tecla":"F3"}] as const).map(f=><label key={f.campo} className="ev-pag-linha"><span>{f.rotulo} <small>({f.tecla})</small></span><div className="ev-pag-entrada"><span>R$</span><input ref={el=>{pagamentoRefs.current[f.campo]=el;}} inputMode="decimal" aria-label={f.rotulo} placeholder="0,00" value={pagamentos[f.campo]} onChange={e=>alterarPagamento(f.campo,e.target.value)}/></div></label>)}
+        <div className="ev-pag-desconto" style={{display:"grid",gap:10}}>
+          <strong>1. DESCONTO DA VENDA <small>(F6)</small></strong>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            <button type="button" disabled={operacaoEnviada} aria-pressed={descontoTipo==="valor"} onClick={()=>{setDescontoTipo("valor");setDescontoPagamento("");setErroPagamento("");}} style={{padding:"8px 14px",borderRadius:8,border:"1px solid #9eb7db",background:descontoTipo==="valor"?"#dbeafe":"white",color:"#102957",fontWeight:700}}>Valor (R$)</button>
+            <button type="button" disabled={operacaoEnviada} aria-pressed={descontoTipo==="percentual"} onClick={()=>{setDescontoTipo("percentual");setDescontoPagamento("");setErroPagamento("");}} style={{padding:"8px 14px",borderRadius:8,border:"1px solid #9eb7db",background:descontoTipo==="percentual"?"#dbeafe":"white",color:"#102957",fontWeight:700}}>Percentual (%)</button>
+          </div>
+          <label className="ev-pag-linha"><span>{descontoTipo==="valor"?"DESCONTO EM REAIS":"DESCONTO EM PORCENTAGEM"}</span><div className="ev-pag-entrada"><span>{descontoTipo==="valor"?"R$":"%"}</span><input ref={el=>{pagamentoRefs.current.desconto=el;}} disabled={operacaoEnviada} inputMode="decimal" aria-label="Desconto" placeholder="0,00" value={descontoPagamento} onChange={e=>{if(!operacaoEnviada&&/^[\d.,]*$/.test(e.target.value)){setErroPagamento("");setDescontoPagamento(e.target.value);}}}/></div></label>
+          <small>Desconto comercial: {dinheiroCentavos(descontoCentavos)}. O valor cobrado será atualizado antes dos pagamentos.</small>
+          {(descontoCentavos>totalCentavos||(descontoTipo==="percentual"&&Number(descontoPagamento.replace(",","."))>100))&&<p role="alert" className="ev-pag-erro">O desconto não pode ultrapassar o total da venda.</p>}
         </div>
-        <div className="ev-pag-desconto"><label className="ev-pag-linha"><span>DESCONTO <small>(F6)</small></span><div className="ev-pag-entrada"><span>R$</span><input ref={el=>{pagamentoRefs.current.desconto=el;}} inputMode="decimal" aria-label="Desconto" placeholder="0,00" value={descontoPagamento} onChange={e=>{if(!operacaoEnviada&&/^[\d.,]*$/.test(e.target.value)){setErroPagamento("");setDescontoPagamento(e.target.value);}}}/></div></label><small>Desconto aplicado ao total da venda.</small>{descontoCentavos>totalCentavos&&<p role="alert" className="ev-pag-erro">O desconto não pode ultrapassar o total da venda.</p>}</div>
+        <div className="ev-pag-resumo" style={{background:"#eaf5ee",border:"1px solid #a4d6b2",color:"#12452c"}}><span>TOTAL COM DESCONTO — VALOR A RECEBER</span><strong>{dinheiroCentavos(totalPagarCentavos)}</strong></div>
+        <p className="ev-pag-instrucao">2. INFORME OS PAGAMENTOS SOBRE O TOTAL ATUALIZADO — PODE UTILIZAR MAIS DE UMA FORMA</p>
+        <div className="ev-pag-campos">
+          {([{"campo":"dinheiro","rotulo":"DINHEIRO","tecla":"F1"},{"campo":"pix","rotulo":"PIX","tecla":"F2"}] as const).map(f=><label key={f.campo} className="ev-pag-linha"><span>{f.rotulo} <small>({f.tecla})</small></span><div className="ev-pag-entrada"><span>R$</span><input ref={el=>{pagamentoRefs.current[f.campo]=el;}} inputMode="decimal" aria-label={f.rotulo} placeholder="0,00" value={pagamentos[f.campo]} onChange={e=>alterarPagamento(f.campo,e.target.value)}/></div></label>)}
+          {([{"modalidade":"debito","rotulo":"CARTÃO DE DÉBITO","tecla":"F3"},{"modalidade":"credito","rotulo":"CARTÃO DE CRÉDITO","tecla":"F4"}] as const).map(f=><div key={f.modalidade} style={{display:"grid",gap:5}}>
+            <label className="ev-pag-linha"><span>{f.rotulo} <small>({f.tecla})</small></span><div className="ev-pag-entrada"><span>R$</span><input ref={el=>{pagamentoRefs.current["cartao_"+f.modalidade]=el;}} inputMode="decimal" aria-label={f.rotulo} placeholder="0,00" disabled={operacaoEnviada} value={pagamentos[f.modalidade]} onFocus={()=>selecionarModalidadeCartao(f.modalidade)} onChange={e=>alterarPagamento(f.modalidade,e.target.value)} onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();e.stopPropagation();if(centavos(e.currentTarget.value)>0&&!operacaoEnviada)abrirConfiguracaoCartao(f.modalidade);}}} onBlur={()=>{if(centavos(pagamentos[f.modalidade])>0&&!cartoesConfigurados[f.modalidade]&&!configurandoCartao&&!operacaoEnviada)abrirConfiguracaoCartao(f.modalidade);}}/></div></label>
+            {centavos(pagamentos[f.modalidade])>0&&<div className="ev-cartao-resumo">
+              <span>{f.modalidade==="debito"?`Débito · ${{visa:"Visa",mastercard:"Mastercard",elo:"Elo"}[bandeiraDebito]||bandeiraDebito}`:`Crédito · ${{visa:"Visa",mastercard:"Mastercard",elo:"Elo",amex:"Amex",diners:"Diners"}[bandeiraCredito]||bandeiraCredito} · ${cartaoParcelas}x`}</span>
+            </div>}
+          </div>)}
+        </div>
         <div className="ev-pag-totais"><div><span>TOTAL A PAGAR</span><strong>{dinheiroCentavos(totalPagarCentavos)}</strong></div><div><span>TOTAL RECEBIDO</span><strong>{dinheiroCentavos(pagoCentavos)}</strong></div>{restanteCentavos>0&&<div className="ev-pag-restante"><span>RESTANTE</span><strong>{dinheiroCentavos(restanteCentavos)}</strong></div>}<div className="ev-pag-troco"><span>TROCO</span><strong>{dinheiroCentavos(trocoCentavos)}</strong></div></div>
         {!valoresValidos&&<p className="ev-pag-erro" role="alert">Use valores com até duas casas decimais.</p>}
         {pagamentosNaoDinheiro>totalPagarCentavos&&<p className="ev-pag-erro" role="alert">PIX e cartão não podem ultrapassar o total a pagar.</p>}
@@ -1653,6 +1781,20 @@ export default function PDV() {
         <footer><button type="button" disabled={finalizandoVenda||operacaoEnviada} onClick={fecharPagamento}>Voltar à venda (Esc)</button><button type="button" disabled={finalizandoVenda||!pagamentoValido} onClick={()=>void confirmarPagamento()}>{finalizandoVenda?"Registrando venda...":operacaoEnviada?"Consultar / tentar novamente (F12)":"Confirmar pagamento (F12)"}</button></footer>
       </>:<><p>As trocas e devoluções precisam identificar a venda original e seus itens, para registrar corretamente o estorno e a movimentação de estoque.</p><p className="ev-operacao-aviso">A operação será disponibilizada após a criação do histórico de vendas e do procedimento de estorno no Supabase. Nenhum estoque será alterado.</p><footer><button type="button" onClick={()=>setModalOperacao(null)}>Voltar à venda (Esc)</button></footer></>}
     </section></div>}
+    {configurandoCartao&&modalOperacao==="pagamento"&&!vendaConfirmada&&<div className="ev-cartao-overlay" onMouseDown={e=>e.stopPropagation()}>
+      <section className="ev-cartao-dialog" role="dialog" aria-modal="true" aria-label={`Configurar cartão de ${configurandoCartao}`}>
+        <header><h2>Configurar Cartão de {configurandoCartao==="debito"?"Débito":"Crédito"}</h2><button type="button" onClick={()=>setConfigurandoCartao(null)} aria-label="Fechar configuração">×</button></header>
+        <div className="ev-cartao-conteudo">
+          <p>Valor no cartão: <strong>{dinheiroCentavos(centavos(pagamentos[configurandoCartao]))}</strong></p>
+          <label>Bandeira
+            {configurandoCartao==="debito"?<select autoFocus value={bandeiraDebito} onChange={e=>setBandeiraDebito(e.target.value)}><option value="visa">Visa</option><option value="mastercard">Mastercard</option><option value="elo">Elo</option></select>
+            :<select autoFocus value={bandeiraCredito} onChange={e=>setBandeiraCredito(e.target.value)}><option value="visa">Visa</option><option value="mastercard">Mastercard</option><option value="elo">Elo</option><option value="amex">American Express</option><option value="diners">Diners</option></select>}
+          </label>
+          {configurandoCartao==="credito"&&<label>Parcelas<select value={cartaoParcelas} onChange={e=>setCartaoParcelas(Number(e.target.value) as 1|2|3)}><option value={1}>1x</option><option value={2}>2x</option><option value={3}>3x</option></select></label>}
+          <footer><button type="button" onClick={()=>setConfigurandoCartao(null)}>Cancelar (Esc)</button><button type="button" onClick={concluirConfiguracaoCartao}>Confirmar configuração</button></footer>
+        </div>
+      </section>
+    </div>}
     {modalCliente&&<div className="ev-venda-overlay"><section className="ev-busca-rapida" role="dialog" aria-modal="true" aria-label="Busca rápida de produtos e clientes" onKeyDown={e=>{if(e.key==="Enter"&&abaBuscaRapida==="produtos"&&!(e.target as HTMLElement).closest("button")){e.preventDefault();confirmarProdutoBuscaRapida();}}}>
       <header className="ev-rapida-titulo"><strong>Busca Rápida</strong><button type="button" onClick={()=>setModalCliente(false)} aria-label="Fechar busca">×</button></header>
       <nav className="ev-rapida-abas"><button type="button" className={abaBuscaRapida==="produtos"?"ativo":""} onClick={()=>{setAbaBuscaRapida("produtos");setIndiceRapido(0)}}>▥ Produtos (F10)</button><button type="button" className={abaBuscaRapida==="clientes"?"ativo":""} onClick={()=>{setAbaBuscaRapida("clientes");setIndiceRapido(0)}}>♙ Clientes (F11)</button><label>Ordenação <select value={ordemRapida} onChange={e=>setOrdemRapida(e.target.value)}><option value="nome">por NOME</option><option value="codigo">por CÓDIGO</option></select></label></nav>
@@ -1967,10 +2109,10 @@ export default function PDV() {
 
       /* EVOLUX — abertura de caixa, identidade visual unificada */
       .ev-turno-modal{width:min(560px,calc(100vw - 30px))!important;padding:0!important;border:1px solid #c8d8ec!important;border-radius:16px!important;overflow:hidden!important;box-shadow:0 28px 80px #0a1b3855!important}
-      .ev-turno-modal>header{margin:0!important;padding:19px 23px!important;background:#132f59!important;color:#fff!important;border:0!important;display:flex;justify-content:space-between;align-items:center;gap:12px}
+      .ev-turno-modal>header{margin:0!important;padding:19px 23px!important;background:#132f59!important;color:#fff!important;border:0!important;display:flex;justify-content:space-between;align-items:center;gap:12px;min-height:74px}
       .ev-turno-modal>header small{font-size:10px;letter-spacing:1.3px;color:#bed2ee}
       .ev-turno-modal>header h2{font-size:21px;font-weight:800;margin:4px 0 0;color:#fff;line-height:1.25}
-      .ev-turno-modal .ev-turno-fechar{background:#ffffff16!important;border:1px solid #ffffff50!important;border-radius:8px!important;color:#fff!important;font-size:25px;width:38px;height:38px;cursor:pointer}
+      .ev-turno-modal .ev-turno-fechar{flex-shrink:0;display:grid;place-items:center;background:#ffffff16!important;border:1px solid #ffffff50!important;border-radius:8px!important;color:#fff!important;font-size:25px;width:38px;height:38px;cursor:pointer}
       .ev-turno-conteudo{padding:24px}
       .ev-turno-pergunta{display:flex;align-items:center;gap:16px;background:#f2f6fc;border:1px solid #d8e4f4;border-radius:10px;padding:17px}
       .ev-turno-pergunta p{margin:0;line-height:1.55;color:#233d60}
@@ -1986,6 +2128,21 @@ export default function PDV() {
       .ev-turno-acoes button:first-child{background:#18477f!important;color:#fff!important;border-color:#18477f!important}
       .ev-turno-acoes button:disabled,.ev-turno-fechar:disabled{cursor:not-allowed!important}
       @media(max-width:520px){.ev-turno-conteudo{padding:16px}.ev-turno-campos{grid-template-columns:1fr 1fr}.ev-turno-modal>header h2{font-size:17px}}
+      /* Configuração de cartão em janela secundária: não expande o pagamento. */
+      .ev-cartao-resumo{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:4px 10px 8px;color:#344e72;font-size:12px;font-weight:700}
+      .ev-cartao-resumo button{border:1px solid #b7c9e5;border-radius:8px;background:#eef4ff;color:#102957;padding:7px 12px;font-weight:800;cursor:pointer}
+      .ev-cartao-overlay{position:fixed;inset:0;z-index:10000;background:rgba(7,22,47,.62);display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
+      .ev-cartao-dialog{width:min(430px,96vw);max-height:90dvh;overflow-y:auto;border-radius:17px;background:#fff;box-shadow:0 24px 65px #07152b70;overflow-x:hidden;color:#102957}
+      .ev-cartao-dialog>header{display:flex;align-items:center;justify-content:space-between;gap:14px;background:#112e59;padding:18px 20px;color:#fff}
+      .ev-cartao-dialog>header h2{font-size:19px;line-height:1.25;margin:0;color:#fff}
+      .ev-cartao-dialog>header button{background:#ffffff18;border:1px solid #ffffff55;color:#fff;border-radius:9px;width:36px;height:36px;font-size:26px;cursor:pointer}
+      .ev-cartao-conteudo{display:grid;gap:16px;padding:20px}
+      .ev-cartao-conteudo p{margin:0;background:#edf3fd;padding:12px;border-radius:9px}
+      .ev-cartao-conteudo label{display:grid;gap:7px;font-size:14px;font-weight:800}
+      .ev-cartao-conteudo select{width:100%;min-height:46px;padding:10px 12px;border:1px solid #b7c9e5;border-radius:9px;background:#fff;color:#102957;font-size:15px}
+      .ev-cartao-conteudo footer{display:flex;justify-content:flex-end;gap:9px;flex-wrap:wrap}
+      .ev-cartao-conteudo footer button{border-radius:9px;border:1px solid #b7c9e5;padding:11px 14px;font-weight:800;cursor:pointer;background:#f4f7fc;color:#102957}
+      .ev-cartao-conteudo footer button:last-child{background:#112e59;color:#fff;border-color:#112e59}
     `}</style>
   </main>;
 }

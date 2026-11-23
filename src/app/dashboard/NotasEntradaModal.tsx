@@ -1,6 +1,7 @@
 "use client";
 import {useEffect,useState} from "react";
 import {createClient} from "@supabase/supabase-js";
+import {temAteDuasCasas} from "@/lib/dinheiro";
 const url=process.env.NEXT_PUBLIC_SUPABASE_URL;
 const key=process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY||process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
 const db=url&&key?createClient(url,key):null;
@@ -54,7 +55,7 @@ export default function NotasEntradaModal({empresaId,onClose}:{empresaId:string;
   if(!db||!selecionada||salvandoPreco)return;
   const preco=precos[item.id];if(!preco){setErro("Produto sem vínculo cadastrado. Não é possível alterar o preço.");return;}
   const valor=Number(preco.novo.replace(",","."));
-  if(!preco.novo.trim()||!Number.isFinite(valor)||valor<=0||Math.round(valor*100)!==valor*100){setErro("Informe um preço positivo com até duas casas decimais.");return;}
+  if(!preco.novo.trim()||!Number.isFinite(valor)||valor<=0||!temAteDuasCasas(valor)){setErro("Informe um preço positivo com até duas casas decimais.");return;}
   setSalvandoPreco(true);setErro("");setAvisoPreco("");
   const tabela=preco.variacao_id?"produto_variacoes":"produtos";
   const id=preco.variacao_id||preco.produto_id;

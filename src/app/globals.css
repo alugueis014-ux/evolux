@@ -1,8 +1,14 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f3f6fb;
+  --ev-navy: #0b2454;
+  --ev-blue: #1763b6;
+  --ev-surface: #ffffff;
+  --ev-border: #dbe5f2;
+  --ev-text: #193458;
+  --ev-muted: #60738f;
+  --foreground: #193458;
 }
 
 @theme inline {
@@ -12,12 +18,7 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
+
 
 body {
   background: var(--background);
@@ -55,3 +56,78 @@ body {
 .ev-cli-modal input,.ev-cli-form-modal input,.ev-supplier-modal input,.ev-supplier-form-modal input,.ev-xml-modal input,.ev-ne-modal input,
 .ev-pdv-cadastro input,.ev-pdv-cadastro select{border-radius:9px!important}
 .ev-dashboard .ev-product-actions button,.ev-cli-footer button,.ev-supplier-footer button,.ev-xml-footer button,.ev-ne-modal footer button,.ev-pdv-cadastro footer button{border-radius:9px!important}
+
+
+/* EVOLUX | Identidade visual Modelo 2 — camada não destrutiva */
+:root { color-scheme: light; }
+html { background: var(--background); }
+body { background: var(--background); color: var(--foreground); }
+:where(button, a, input, select, textarea):focus-visible {
+  outline: 3px solid #74b4ff !important;
+  outline-offset: 2px;
+}
+:where(input:not([type="checkbox"]):not([type="radio"]), select, textarea) {
+  accent-color: var(--ev-blue);
+}
+:where(.ev-dashboard, .ev-caixa-livre) {
+  --ev-navy: #0b2454;
+  --ev-blue: #1763b6;
+  --ev-surface: #fff;
+  --ev-border: #dbe5f2;
+}
+.ev-dashboard .ev-header, .ev-caixa-livre .ev-novo-topo {
+  background: #0b2454 !important;
+  background-image: none !important;
+  box-shadow: 0 8px 28px rgba(11,36,84,.12);
+}
+.ev-dashboard .ev-content, .ev-caixa-livre .ev-novo-conteudo {
+  background: #f3f6fb;
+}
+.ev-dashboard :is(.ev-card,.ev-intro,.ev-info,.ev-kpis > *, .ev-bottom-grid > *),
+.ev-caixa-livre :is(.ev-novo-card,.ev-novo-principal,.ev-novo-lateral) {
+  border-radius: 18px;
+}
+.ev-dashboard :is(.ev-card,.ev-kpis > *),
+.ev-caixa-livre .ev-novo-card {
+  box-shadow: 0 7px 24px rgba(20,51,94,.055);
+}
+.ev-dashboard :is(.ev-product-modal,.ev-form-modal,.ev-empresa-window,.ev-caixa-window),
+.ev-caixa-livre :is(.ev-turno-modal,.ev-hist-modal,.ev-correcao-modal,.ev-venda-tela),
+:where(.ev-cli-modal,.ev-cli-form-modal,.ev-supplier-modal,.ev-supplier-form-modal,.ev-xml-modal,.ev-ne-modal,.ev-pdv-cadastro) {
+  border-radius: 18px !important;
+  box-shadow: 0 22px 70px rgba(8,28,65,.22);
+}
+.ev-dashboard :is(.ev-product-heading,.ev-caixa-heading),
+.ev-caixa-livre :is(.ev-turno-modal > header,.ev-hist-topo,.ev-correcao-topo),
+:where(.ev-cli-header,.ev-supplier-head,.ev-xml-head,.ev-ne-modal > header,.ev-pdv-cadastro > header,.company-modal-head,.ev-rapida-titulo) {
+  background: #0b2454 !important;
+  background-image: none !important;
+  color: #fff !important;
+}
+.ev-dashboard :is(.ev-product-table,.ev-table),
+.ev-caixa-livre :is(.ev-hist-tabela,.ev-canc-tabela) { border-collapse: separate; border-spacing: 0; }
+.ev-dashboard :is(.ev-product-table th,.ev-table th),
+.ev-caixa-livre :is(.ev-hist-tabela th,.ev-canc-tabela th) {
+  background: #eaf1fa;
+  color: #193458;
+}
+.ev-dashboard :is(input,select,textarea),
+.ev-caixa-livre :is(input,select,textarea) {
+  border-radius: 10px;
+}
+.ev-dashboard button, .ev-caixa-livre button { transition: background-color .15s ease, box-shadow .15s ease, transform .15s ease; }
+.ev-dashboard button:not(:disabled):active, .ev-caixa-livre button:not(:disabled):active { transform: translateY(1px); }
+@media (max-width: 700px) {
+  .ev-dashboard :is(.ev-product-modal,.ev-form-modal,.ev-caixa-window),
+  .ev-caixa-livre :is(.ev-turno-modal,.ev-hist-modal,.ev-correcao-modal) {
+    max-width: calc(100vw - 20px);
+    max-height: calc(100dvh - 20px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ev-dashboard button,.ev-caixa-livre button { transition: none; }
+}
+
+/* Monograma EVOLUX na marca do dashboard */
+.ev-dashboard .ev-brand-modelo2 { display: inline-flex; align-items: center; gap: 12px; }
+.ev-dashboard .ev-brand-modelo2::before { content: ""; display: inline-block; flex: 0 0 36px; width: 36px; height: 36px; background: url('/icons/evolux.svg') center/contain no-repeat; border-radius: 9px; }

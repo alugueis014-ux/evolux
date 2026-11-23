@@ -1,5 +1,6 @@
 import {NextRequest,NextResponse} from 'next/server';
 import {company} from '@/lib/funcionarios-server';
+import {validarSessaoFuncionario} from '@/lib/sessao-funcionario';
 const fail=(error:string,status=400)=>NextResponse.json({error},{status});
 export async function GET(req:NextRequest){
  try{const c=await company(req);if(!c)return fail('Sessão da empresa inválida',401);
@@ -13,6 +14,8 @@ export async function GET(req:NextRequest){
 export async function POST(req:NextRequest){
  try{const c=await company(req);if(!c)return fail('Sessão da empresa inválida',401);
  const b=await req.json(),empresaId=String(b.empresaId||''),nome=String(b.nome||'').trim(),pin=String(b.pin||''),papel=String(b.papel||'');
+ const funcionario=await validarSessaoFuncionario(req,c.user.id,c.admin);
+ if(!funcionario||funcionario.papel!=='administrador'||funcionario.empresaId!==empresaId)return fail('PIN de administrador da empresa obrigatório',403);
  if(!c.links.some(l=>l.empresa_id===empresaId&&l.papel==='administrador'))return fail('Somente administrador da empresa',403);
  if(nome.length<3||nome.length>80||pin.length<3||pin.length>64||!['administrador','vendedor'].includes(papel))return fail('Dados inválidos',400);
  const normal=nome.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLocaleLowerCase('pt-BR').replace(/\s+/g,' ').trim();
@@ -24,6 +27,8 @@ export async function POST(req:NextRequest){
 export async function PATCH(req:NextRequest){
  try{const c=await company(req);if(!c)return fail('Sessão da empresa inválida',401);
  const b=await req.json(),empresaId=String(b.empresaId||''),id=String(b.id||'');
+ const funcionario=await validarSessaoFuncionario(req,c.user.id,c.admin);
+ if(!funcionario||funcionario.papel!=='administrador'||funcionario.empresaId!==empresaId)return fail('PIN de administrador da empresa obrigatório',403);
  if(!c.links.some(l=>l.empresa_id===empresaId&&l.papel==='administrador'))return fail('Somente administrador',403);
  if(typeof b.ativo!=='boolean')return fail('Situação inválida');
  const {data:target,error:e}=await c.admin.from('evolux_funcionarios').select('id,papel,ativo').eq('empresa_id',empresaId).eq('id',id).maybeSingle();
