@@ -349,7 +349,7 @@ export default function PDV() {
       const [vendaAtual,itens,pagamentosVenda]=await Promise.all([
         supabase.from("vendas").select("*").eq("id",String(venda.id)).eq("empresa_id",empresaId).single(),
         supabase.from("venda_itens").select("id,descricao,quantidade,preco_unitario,subtotal").eq("venda_id",String(venda.id)),
-        supabase.from("venda_pagamentos").select("id,forma,valor").eq("venda_id",String(venda.id))
+        supabase.from("venda_pagamentos").select("id,forma,valor,modalidade,bandeira,parcelas").eq("venda_id",String(venda.id))
       ]);
       if(vendaAtual.error)throw new Error(vendaAtual.error.message);
       if(itens.error)throw new Error("Itens: "+itens.error.message);
@@ -563,7 +563,11 @@ export default function PDV() {
   }
   const [correcaoVenda,setCorrecaoVenda] = useState<Record<string,unknown>|null>(null);
   const [correcaoAtual,setCorrecaoAtual] = useState<Record<string,unknown>[]>([]);
-  const [correcaoValores,setCorrecaoValores] = useState({dinheiro:"",pix:"",cartao:""});
+  const [correcaoValores,setCorrecaoValores] = useState({dinheiro:"",pix:"",debito:"",credito:""});
+  const [correcaoBandeiraDebito,setCorrecaoBandeiraDebito]=useState("visa");
+  const [correcaoBandeiraCredito,setCorrecaoBandeiraCredito]=useState("visa");
+  const [correcaoParcelas,setCorrecaoParcelas]=useState(1);
+  const [correcaoDetalhesPendentes,setCorrecaoDetalhesPendentes]=useState(false);
   const [correcaoMotivo,setCorrecaoMotivo] = useState("");
   const [correcaoCarregando,setCorrecaoCarregando] = useState(false);
   const [correcaoSalvando,setCorrecaoSalvando] = useState(false);
@@ -578,25 +582,40 @@ export default function PDV() {
   };
   const correcaoSoma=Object.values(correcaoValores).reduce((a,v)=>a+correcaoCentavos(v),0);
   const correcaoTotal=correcaoVenda?Math.round(Number(correcaoVenda.total||0)*100):0;
-  const correcaoValida=!!correcaoVenda&&!correcaoCarregando&&!correcaoSalvando&&Number.isFinite(correcaoSoma)&&correcaoSoma===correcaoTotal&&correcaoTotal>0&&correcaoMotivo.trim().length>=5;
+  const correcaoValida=!correcaoDetalhesPendentes&&!!correcaoVenda&&!correcaoCarregando&&!correcaoSalvando&&Number.isFinite(correcaoSoma)&&correcaoSoma===correcaoTotal&&correcaoTotal>0&&correcaoMotivo.trim().length>=5;
   async function abrirCorrecao(venda:Record<string,unknown>){
     if(!supabase)return;
-    setCorrecaoVenda(venda);setCorrecaoAtual([]);setCorrecaoValores({dinheiro:"",pix:"",cartao:""});
+    setCorrecaoVenda(venda);setCorrecaoAtual([]);setCorrecaoValores({dinheiro:"",pix:"",debito:"",credito:""});
+    setCorrecaoBandeiraDebito("visa");setCorrecaoBandeiraCredito("visa");setCorrecaoParcelas(1);setCorrecaoDetalhesPendentes(false);
     setCorrecaoMotivo("");setCorrecaoErro("");setCorrecaoSucesso("");setCorrecaoCarregando(true);
-    const {data,error}=await supabase.from("venda_pagamentos").select("id,forma,valor").eq("venda_id",String(venda.id));
+    const {data,error}=await supabase.from("venda_pagamentos").select("id,forma,valor,modalidade,bandeira,parcelas").eq("venda_id",String(venda.id));
     if(error){setCorrecaoErro("Não foi possível consultar os pagamentos: "+error.message);}
     else{
       const registros=(data||[]) as Record<string,unknown>[];
       setCorrecaoAtual(registros);
-      const valores={dinheiro:0,pix:0,cartao:0};
+      const valores={dinheiro:0,pix:0,debito:0,credito:0};
       let desconhecida=false;
+      let cartaoSemDetalhes=false;
       for(const registro of registros){
         const forma=String(registro.forma);
-        if(!(forma in valores)){desconhecida=true;continue;}
-        valores[forma as keyof typeof valores]+=Math.round(Number(registro.valor||0)*100);
+        if(forma==="dinheiro"||forma==="pix"){valores[forma]+=Math.round(Number(registro.valor||0)*100);continue;}
+        if(forma==="cartao"){
+          const modalidade=String(registro.modalidade||"").toLowerCase();
+          if(modalidade!=="debito"&&modalidade!=="credito"){cartaoSemDetalhes=true;continue;}
+          valores[modalidade]+=Math.round(Number(registro.valor||0)*100);
+          if(modalidade==="debito"&&registro.bandeira)setCorrecaoBandeiraDebito(String(registro.bandeira));
+          if(modalidade==="credito"){
+            if(registro.bandeira)setCorrecaoBandeiraCredito(String(registro.bandeira));
+            if(Number(registro.parcelas)>=1&&Number(registro.parcelas)<=3)setCorrecaoParcelas(Number(registro.parcelas));
+          }
+          continue;
+        }
+        desconhecida=true;
       }
-      if(desconhecida)setCorrecaoErro("Esta venda contém uma forma de pagamento ainda não suportada nesta tela. Não é possível corrigi-la aqui.");
-      else setCorrecaoValores({dinheiro:valores.dinheiro?(valores.dinheiro/100).toFixed(2).replace(".",","):"",pix:valores.pix?(valores.pix/100).toFixed(2).replace(".",","):"",cartao:valores.cartao?(valores.cartao/100).toFixed(2).replace(".",","):""});
+      setCorrecaoDetalhesPendentes(cartaoSemDetalhes);
+      if(desconhecida)setCorrecaoErro("Esta venda contém uma forma de pagamento não suportada nesta tela.");
+      else if(cartaoSemDetalhes)setCorrecaoErro("Pagamento antigo em cartão sem modalidade. Informe novamente crédito ou débito.");
+      setCorrecaoValores({dinheiro:valores.dinheiro?(valores.dinheiro/100).toFixed(2).replace(".",","):"",pix:valores.pix?(valores.pix/100).toFixed(2).replace(".",","):"",debito:valores.debito?(valores.debito/100).toFixed(2).replace(".",","):"",credito:valores.credito?(valores.credito/100).toFixed(2).replace(".",","):""});
     }
     setCorrecaoCarregando(false);
   }
@@ -607,9 +626,15 @@ export default function PDV() {
     }
     setCorrecaoSalvando(true);setCorrecaoErro("");
     try{
-      const {data,error}=await supabase.rpc("evolux_corrigir_pagamento_autorizado",{
+      const novosPagamentos=[
+        {forma:"dinheiro",valor:correcaoCentavos(correcaoValores.dinheiro)/100},
+        {forma:"pix",valor:correcaoCentavos(correcaoValores.pix)/100},
+        {forma:"cartao",modalidade:"debito",bandeira:correcaoBandeiraDebito,parcelas:1,valor:correcaoCentavos(correcaoValores.debito)/100},
+        {forma:"cartao",modalidade:"credito",bandeira:correcaoBandeiraCredito,parcelas:correcaoParcelas,valor:correcaoCentavos(correcaoValores.credito)/100}
+      ].filter(p=>p.valor>0);
+      const {data,error}=await supabase.rpc("evolux_corrigir_pagamento_detalhado_autorizado",{
         p_venda_id:String(correcaoVenda.id),
-        p_pagamentos:{dinheiro:correcaoCentavos(correcaoValores.dinheiro)/100,pix:correcaoCentavos(correcaoValores.pix)/100,cartao:correcaoCentavos(correcaoValores.cartao)/100},
+        p_pagamentos:novosPagamentos,
         p_motivo:correcaoMotivo.trim(),
         p_administrador:pagamentoCredencial.administrador,
         p_pin:pagamentoCredencial.pin
@@ -618,7 +643,7 @@ export default function PDV() {
       if(error)throw new Error(error.message);
       if(!data?.sucesso)throw new Error(data?.erro||"O banco não confirmou a correção.");
       setCorrecaoSucesso("Pagamento corrigido e auditado com autorização do administrador.");
-      const {data:atualizados,error:erroLeitura}=await supabase.from("venda_pagamentos").select("id,forma,valor").eq("venda_id",String(correcaoVenda.id));
+      const {data:atualizados,error:erroLeitura}=await supabase.from("venda_pagamentos").select("id,forma,valor,modalidade,bandeira,parcelas").eq("venda_id",String(correcaoVenda.id));
       if(!erroLeitura){
         setCorrecaoAtual((atualizados||[]) as Record<string,unknown>[]);
         setHistoricoPagamentosLista(atuais=>[...atuais.filter(p=>String(p.venda_id)!==String(correcaoVenda.id)),...(atualizados||[]).map(p=>({...p,venda_id:String(correcaoVenda.id)}))]);
@@ -1545,17 +1570,24 @@ export default function PDV() {
         {historicoVendas.length===1000&&<p className="ev-hist-aviso">A consulta está limitada aos primeiros 1.000 registros. Use um filtro no banco para relatórios completos.</p>}
       </div>}
       {correcaoVenda&&<div className="ev-correcao-fundo"><section className="ev-correcao-modal" role="dialog" aria-modal="true" aria-label="Corrigir forma de pagamento">
-        <header className="ev-correcao-topo"><div><small>EVOLUX • CORREÇÃO AUDITADA</small><h3>Alterar forma de pagamento</h3></div><button type="button" disabled={correcaoSalvando} onClick={fecharCorrecao} aria-label="Fechar correção">✕</button></header>
+        <header className="ev-correcao-topo"><div><h3>Alterar forma de pagamento</h3></div><button type="button" disabled={correcaoSalvando} onClick={fecharCorrecao} aria-label="Fechar correção">✕</button></header>
         <div className="ev-correcao-corpo">
           <div className="ev-correcao-resumo"><span>Venda #{historicoNumero(correcaoVenda)}</span><strong>{dinheiro(correcaoTotal/100)}</strong></div>
           {correcaoCarregando?<p>Consultando pagamentos atuais...</p>:<>
             <h4>Pagamento registrado</h4>
-            <div className="ev-correcao-atuais">{correcaoAtual.map((p,i)=><div key={String(p.id||i)}><span>{String(p.forma)}</span><strong>{dinheiro(Number(p.valor||0))}</strong></div>)}{!correcaoAtual.length&&<p>Nenhum pagamento encontrado.</p>}</div>
+            <div className="ev-correcao-atuais">{correcaoAtual.map((p,i)=><div key={String(p.id||i)}><span>{String(p.forma)==="cartao"?`Cartão ${String(p.modalidade||"não identificado")}${p.bandeira?" · "+String(p.bandeira):""}${p.parcelas?" · "+String(p.parcelas)+"x":""}`:String(p.forma)}</span><strong>{dinheiro(Number(p.valor||0))}</strong></div>)}{!correcaoAtual.length&&<p>Nenhum pagamento encontrado.</p>}</div>
             {!correcaoSucesso&&<><h4>Nova distribuição de pagamentos</h4>
               <p className="ev-correcao-dica">Preencha as formas utilizadas. Deixe as demais em branco. A soma deve ser exatamente igual ao valor da venda.</p>
-              <div className="ev-correcao-campos">{([['dinheiro','Dinheiro'],['pix','PIX'],['cartao','Cartão crédito/débito']] as const).map(([forma,rotulo])=><label key={forma}>{rotulo}<input inputMode="decimal" value={correcaoValores[forma]} onChange={e=>{setCorrecaoValores(a=>({...a,[forma]:e.target.value}));setCorrecaoErro("");}} placeholder="0,00" disabled={correcaoSalvando} /></label>)}</div>
+              <div className="ev-correcao-formas">
+                {([['dinheiro','Dinheiro'],['pix','PIX'],['debito','Cartão de débito'],['credito','Cartão de crédito']] as const).map(([forma,rotulo])=><div className="ev-correcao-forma" key={forma}>
+                  <label className="ev-correcao-valor">{rotulo}<input inputMode="decimal" value={correcaoValores[forma]} onChange={e=>{setCorrecaoValores(a=>({...a,[forma]:e.target.value}));setCorrecaoErro("");setCorrecaoDetalhesPendentes(false);}} placeholder="0,00" disabled={correcaoSalvando}/></label>
+                  {forma==="debito"&&correcaoCentavos(correcaoValores.debito)>0&&<label className="ev-correcao-opcao">Bandeira<select value={correcaoBandeiraDebito} onChange={e=>setCorrecaoBandeiraDebito(e.target.value)} disabled={correcaoSalvando}><option value="visa">Visa</option><option value="mastercard">Mastercard</option><option value="elo">Elo</option></select></label>}
+                  {forma==="credito"&&correcaoCentavos(correcaoValores.credito)>0&&<div className="ev-correcao-opcoes"><label className="ev-correcao-opcao">Bandeira<select value={correcaoBandeiraCredito} onChange={e=>setCorrecaoBandeiraCredito(e.target.value)} disabled={correcaoSalvando}><option value="visa">Visa</option><option value="mastercard">Mastercard</option><option value="elo">Elo</option><option value="amex">American Express</option><option value="diners">Diners</option></select></label><label className="ev-correcao-opcao">Parcelas<select value={correcaoParcelas} onChange={e=>setCorrecaoParcelas(Number(e.target.value))} disabled={correcaoSalvando}>{[1,2,3].map(n=><option key={n} value={n}>{n}x</option>)}</select></label></div>}
+                </div>)}
+              </div>
+              {correcaoDetalhesPendentes&&<p role="alert" className="ev-hist-erro">Pagamento antigo sem identificação de crédito/débito. Informe novamente a distribuição completa antes de confirmar.</p>}
               <div className="ev-correcao-soma"><span>Total informado: <strong>{Number.isFinite(correcaoSoma)?dinheiro(correcaoSoma/100):"Valor inválido"}</strong></span><span>Diferença: <strong>{Number.isFinite(correcaoSoma)?dinheiro((correcaoTotal-correcaoSoma)/100):"—"}</strong></span></div>
-              <label className="ev-correcao-motivo">Motivo da correção (obrigatório)<textarea value={correcaoMotivo} onChange={e=>{setCorrecaoMotivo(e.target.value);setCorrecaoErro("");}} rows={3} maxLength={1000} disabled={correcaoSalvando||!!correcaoErro} placeholder="Ex.: Cliente pagou via PIX, mas a venda foi registrada em dinheiro." /></label>
+              <label className="ev-correcao-motivo">Motivo da correção (obrigatório)<textarea value={correcaoMotivo} onChange={e=>{setCorrecaoMotivo(e.target.value);setCorrecaoErro("");}} rows={3} maxLength={1000} disabled={correcaoSalvando} placeholder="Ex.: Cliente pagou via PIX, mas a venda foi registrada em dinheiro." /></label>
               <p className="ev-correcao-dica">A correção será registrada com usuário, data, hora, justificativa e pagamentos anteriores e novos. Não altera o estoque nem o total da venda.</p></>}
           </>}
           {correcaoErro&&<p role="alert" className="ev-hist-erro">{correcaoErro}</p>}
@@ -1596,6 +1628,28 @@ export default function PDV() {
     .ev-turno-overlay{position:fixed;inset:0;z-index:2000;background:#07162f55;display:flex;align-items:center;justify-content:center;padding:15px}.ev-turno-modal{width:min(430px,100%);background:#fff;border:1px solid #b7c5d9;border-radius:8px;box-shadow:0 18px 50px #0004;padding:0 18px 18px;color:#142b4d;font-size:14px}.ev-turno-modal header{font-weight:700;font-size:16px;margin:0 -18px 18px;padding:15px 18px;background:#eef3fa;border-bottom:1px solid #dce5f0}.ev-turno-modal p{line-height:1.5}.ev-turno-campos{display:flex;gap:30px;margin-bottom:18px}.ev-turno-campos>div{display:flex;flex-direction:column;gap:5px}.ev-turno-campos small{color:#60728a}.ev-turno-modal form{display:flex;flex-direction:column;gap:10px}.ev-turno-modal input{padding:11px;border:1px solid #aabbd2;border-radius:5px;font-size:17px}.ev-turno-acoes{display:flex;justify-content:flex-end;gap:9px;margin-top:16px}.ev-turno-acoes button{padding:11px 15px;border:1px solid #b5c6dc;border-radius:6px;background:#f3f6fa;cursor:pointer}.ev-turno-acoes button:first-child{background:#0b2454;color:#fff}.ev-turno-acoes button:disabled{opacity:.5}.ev-turno-erro,.ev-caixa-erro{color:#a32626;background:#fff0ee;padding:10px;border-radius:5px}.ev-caixa-erro,.ev-caixa-processando{position:absolute;top:120px;left:18px;max-width:500px;font-size:13px}.ev-caixa-processando{color:#344761}
     .ev-hist-fundo{position:fixed;inset:0;z-index:3500;background:#0b1e3a99;display:flex;align-items:center;justify-content:center;padding:20px}.ev-hist-modal{width:min(930px,100%);max-height:90dvh;background:#fff;border-radius:17px;box-shadow:0 25px 80px #0005;display:flex;flex-direction:column;overflow:hidden}.ev-hist-topo{display:flex;justify-content:space-between;align-items:center;background:#102b55;color:#fff;padding:18px 24px}.ev-hist-topo small{font-size:10px;letter-spacing:1.5px;color:#bdd2ef}.ev-hist-topo h2{margin:4px 0 0;font-size:23px}.ev-hist-topo button{background:#ffffff1c;color:#fff;border:1px solid #ffffff44;border-radius:8px;padding:10px;cursor:pointer}.ev-hist-corpo{padding:22px;overflow:auto}.ev-hist-filtros{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px}.ev-hist-abas{display:flex;gap:5px}.ev-hist-filtros button,.ev-hist-tabela button{border:1px solid #c9d9ee;border-radius:8px;background:#f0f5fd;padding:10px 12px;color:#163c70;cursor:pointer}.ev-hist-abas .ativo{background:#163e75;color:#fff}.ev-hist-filtros input{border:1px solid #c9d9ee;border-radius:8px;padding:11px;flex:1;min-width:160px}.ev-hist-resumo{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:20px}.ev-hist-resumo>div{border:1px solid #dae5f1;border-radius:11px;padding:14px;background:#f8fafd}.ev-hist-resumo small{display:block;color:#627b99;font-size:11px}.ev-hist-resumo strong{display:block;font-size:19px;margin-top:5px}.ev-hist-tabela{overflow:auto}.ev-hist-tabela table{width:100%;border-collapse:collapse}.ev-hist-tabela th{text-align:left;background:#eff4fa;color:#365678;padding:12px}.ev-hist-tabela td{border-bottom:1px solid #e3eaf3;padding:12px}.ev-hist-tabela td:nth-child(3){font-weight:700}.ev-hist-corpo h3{margin:16px 0 8px}.ev-hist-lista{border:1px solid #dce5f1;border-radius:10px;overflow:hidden}.ev-hist-item,.ev-hist-pag{padding:12px;border-bottom:1px solid #e3eaf3;display:flex;justify-content:space-between;gap:12px}.ev-hist-item{flex-direction:column;gap:4px}.ev-hist-item span{text-align:right}.ev-hist-erro{background:#fff0ee;color:#a32626;padding:12px;border-radius:8px}.ev-hist-aviso{font-size:12px;color:#697c96;margin-top:16px}@media(max-width:600px){.ev-hist-fundo{padding:6px}.ev-hist-modal{max-height:97dvh}.ev-hist-corpo{padding:12px}.ev-hist-resumo{gap:5px}.ev-hist-resumo>div{padding:8px}.ev-hist-resumo strong{font-size:14px}}
     .ev-hist-forma{white-space:nowrap;font-weight:600;color:#355576}.ev-hist-tabela .ev-hist-reimprimir{background:#eef2ff;border-color:#c7d3f5;color:#263f86;font-weight:700;white-space:nowrap}.ev-hist-tabela button:disabled{opacity:.55;cursor:not-allowed}    .ev-hist-acoes{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.ev-hist-tabela .ev-hist-corrigir{background:#e9f7f0;border-color:#b8dec9;color:#12623e;font-weight:700;white-space:nowrap}
+    /* Janela de correção: layout visual isolado, sem alterar regras financeiras. */
+    .ev-correcao-fundo{position:fixed!important;inset:0!important;z-index:10000!important;padding:20px!important;align-items:center!important}
+    .ev-correcao-modal{display:flex!important;flex-direction:column!important;width:min(720px,100%)!important;max-height:min(90vh,860px)!important;overflow:hidden!important;border-radius:16px!important}
+    .ev-correcao-topo{flex:0 0 auto!important;padding:18px 24px!important;background:#102b55!important}
+    .ev-correcao-topo h3{margin:0!important;font-size:19px!important;font-weight:700!important;color:white!important}
+    .ev-correcao-topo button{width:36px;height:36px;display:grid;place-items:center;padding:0!important;border-radius:10px!important;font-size:19px}
+    .ev-correcao-corpo{overflow-y:auto!important;min-height:0!important;padding:22px 24px 24px!important}
+    .ev-correcao-corpo h4{margin:20px 0 10px!important;font-size:14px!important;color:#102b55!important}
+    .ev-correcao-dica{margin:8px 0 14px!important;line-height:1.55!important}
+    .ev-correcao-formas{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:14px 0 18px}
+    .ev-correcao-forma{min-width:0;border:1px solid #dce5f1;border-radius:12px;padding:15px;background:#f9fbfe;display:flex;flex-direction:column;gap:12px}
+    .ev-correcao-valor,.ev-correcao-opcao{display:block;min-width:0;font-size:13px;font-weight:700;color:#284363}
+    .ev-correcao-valor input,.ev-correcao-opcao select{display:block;width:100%;min-width:0;height:43px;margin-top:8px;border:1px solid #cbd9ea;border-radius:9px;padding:9px 12px;background:#fff;color:#193555;font:14px Arial,sans-serif;box-sizing:border-box}
+    .ev-correcao-valor input:focus,.ev-correcao-opcao select:focus,.ev-correcao-motivo textarea:focus{outline:2px solid #83b5ff;outline-offset:1px}
+    .ev-correcao-opcoes{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,100px);gap:10px}
+    .ev-correcao-soma{display:flex!important;justify-content:space-between!important;align-items:center!important;gap:12px!important;padding:15px 16px!important;margin:18px 0!important;border:1px solid #dce5f1!important;border-radius:11px!important;background:#f3f7fc!important;font-size:13px!important}
+    .ev-correcao-soma span{margin:0!important}
+    .ev-correcao-motivo{margin-top:18px!important;font-size:13px!important}
+    .ev-correcao-motivo textarea{min-height:90px;box-sizing:border-box;border-radius:10px!important}
+    .ev-correcao-botoes{border-top:1px solid #e6edf5;padding-top:17px;margin-top:20px!important}
+    .ev-correcao-botoes button{min-height:42px;border-radius:9px!important}
+    @media(max-width:580px){.ev-correcao-fundo{padding:10px!important}.ev-correcao-modal{max-height:95vh!important}.ev-correcao-corpo{padding:16px!important}.ev-correcao-formas{grid-template-columns:1fr;gap:10px}.ev-correcao-soma{flex-direction:column;align-items:stretch!important}.ev-correcao-botoes{display:grid;grid-template-columns:1fr 1fr}}
     .ev-correcao-fundo{position:absolute;inset:0;z-index:3;background:#07172dc9;display:flex;align-items:center;justify-content:center;padding:12px}.ev-hist-modal{position:relative}.ev-correcao-modal{width:min(550px,100%);max-height:100%;overflow:auto;background:#fff;color:#183253;border-radius:14px;box-shadow:0 18px 55px #0005}.ev-correcao-topo{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:17px 20px;background:#102b55;color:#fff}.ev-correcao-topo small{color:#bdd2ef;font-size:10px;letter-spacing:1px}.ev-correcao-topo h3{margin:4px 0 0;font-size:19px}.ev-correcao-topo button{background:#ffffff20;border:1px solid #ffffff50;border-radius:8px;color:#fff;padding:8px 12px}.ev-correcao-corpo{padding:20px}.ev-correcao-resumo,.ev-correcao-atuais>div,.ev-correcao-soma{display:flex;justify-content:space-between;gap:10px;align-items:center}.ev-correcao-resumo{padding:13px;border:1px solid #dce5f1;background:#f5f8fc;border-radius:9px}.ev-correcao-resumo strong{font-size:21px}.ev-correcao-corpo h4{margin:18px 0 9px;font-size:14px}.ev-correcao-atuais{border:1px solid #dce5f1;border-radius:8px}.ev-correcao-atuais>div{padding:10px 12px;border-bottom:1px solid #e6edf5}.ev-correcao-atuais>div:last-child{border-bottom:0}.ev-correcao-dica{font-size:12px;line-height:1.5;color:#657a96}.ev-correcao-campos{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.ev-correcao-campos label,.ev-correcao-motivo{font-size:12px;font-weight:700;color:#2c496e}.ev-correcao-campos input,.ev-correcao-motivo textarea{display:block;width:100%;margin-top:7px;border:1px solid #cbd9ea;border-radius:8px;padding:10px;color:#193555;font:14px Arial,sans-serif}.ev-correcao-soma{margin:13px 0;padding:12px;border-radius:8px;background:#f3f7fc;font-size:12px;flex-wrap:wrap}.ev-correcao-motivo{display:block;margin-top:14px}.ev-correcao-motivo textarea{resize:vertical}.ev-correcao-botoes{display:flex;justify-content:flex-end;gap:10px;margin-top:17px}.ev-correcao-botoes button{padding:11px 15px;border:1px solid #cbd9ea;background:#f5f8fc;color:#193555;border-radius:8px;font-weight:700}.ev-correcao-botoes .ev-correcao-confirmar{background:#137246;color:white;border-color:#137246}.ev-correcao-sucesso{padding:12px;border-radius:8px;background:#e8f7ee;color:#12623e;font-weight:700}.ev-correcao-modal button:not(:disabled){cursor:pointer}.ev-correcao-modal button:disabled{opacity:.55;cursor:not-allowed}@media(max-width:560px){.ev-correcao-campos{grid-template-columns:1fr}.ev-correcao-corpo{padding:12px}.ev-correcao-soma{display:block}.ev-correcao-soma span{display:block;margin:5px 0}}
 
     /* EVOLUX Modelo 2 — Caixa Livre. Estilos limitados a esta tela. */
