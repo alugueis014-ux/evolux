@@ -1,3 +1,14 @@
+export async function GET(req:NextRequest){
+ try{
+  const c=await company(req);if(!c)return fail("Sessão inválida",401);
+  const empresaId=new URL(req.url).searchParams.get("empresaId")||"";
+  if(!c.links.some(l=>l.empresa_id===empresaId&&l.papel==="administrador"))return fail("Acesso restrito",403);
+  const {data,error}=await c.admin.from("evolux_recuperacoes_pin").select("id,funcionario_id,solicitado_em").eq("empresa_id",empresaId).eq("situacao","pendente").order("solicitado_em",{ascending:false}).limit(50);
+  if(error)return fail("Falha ao consultar pendências",500);
+  const {data:funcionarios}=await c.admin.from("evolux_funcionarios").select("id,nome").eq("empresa_id",empresaId);
+  return NextResponse.json({solicitacoes:(data||[]).map(x=>({...x,nome:funcionarios?.find(f=>f.id===x.funcionario_id)?.nome||"Funcionário"}))},{headers:{"Cache-Control":"no-store"}});
+ }catch{return fail("Falha ao consultar pendências",500)}
+}
 import {NextRequest,NextResponse} from 'next/server';
 import {randomBytes,createHash} from 'node:crypto';
 import {company} from '@/lib/funcionarios-server';

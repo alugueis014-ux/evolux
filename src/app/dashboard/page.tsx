@@ -53,7 +53,6 @@ const menu: { label: string; icon: IconName; detail: string }[] = [
   { label: "Vender (PDV)", icon: "cart", detail: "Frente de caixa" },
   { label: "Caixa", icon: "cash", detail: "Abertura e fechamento" },
   { label: "Financeiro", icon: "wallet", detail: "Gestão financeira" },
-  { label: "Compras", icon: "truck", detail: "Compras e fornecedores" },
   { label: "Notas Fiscais", icon: "file", detail: "Documentos fiscais" },
   { label: "Backup", icon: "cloud", detail: "Cópias de segurança" },
 ];
@@ -68,6 +67,14 @@ export default function Dashboard() {
   const [aviso, setAviso] = useState("");
   const [aba, setAba] = useState("Cadastros");
   const [cadastrosMenuAberto, setCadastrosMenuAberto] = useState(false);
+  const [menuSuperior,setMenuSuperior]=useState<"Lançamentos"|"Relatórios"|null>(null);
+  const [relatorioAberto,setRelatorioAberto]=useState("");
+  const [relatorioDados,setRelatorioDados]=useState<Record<string,unknown>[]>([]);
+  const [relatorioErro,setRelatorioErro]=useState("");
+  const [relatorioCarregando,setRelatorioCarregando]=useState(false);
+  const [kpis,setKpis]=useState<{vendas:number;faturamento:number;estoque:number}|null>(null);
+  const [backupOcupado,setBackupOcupado]=useState(false);
+
   const [saindo, setSaindo] = useState(false);
   const [trocandoUsuario, setTrocandoUsuario] = useState(false);
   const [produtosAberto, setProdutosAberto] = useState(false);
@@ -146,6 +153,62 @@ export default function Dashboard() {
     else { setCadastrosMenuAberto(false); setAviso("Funcionalidade ainda em desenvolvimento."); }
   }
 
+  async function exportarBackup(){
+    if(!supabase||!empresaId||backupOcupado)return;
+    setBackupOcupado(true);setAviso("");
+    try{
+      const {data:{session}}=await supabase.auth.getSession();
+      if(!session)throw new Error("Sessão expirada.");
+      const res=await fetch("/api/backup",{headers:{Authorization:`Bearer ${session.access_token}`},cache:"no-store"});
+      if(!res.ok){const d=await res.json();throw new Error(d.error||"Falha no backup.");}
+      const blob=await res.blob();
+      const url=URL.createObjectURL(blob);
+      const a=document.createElement("a");a.href=url;a.download=`evolux-backup-${new Date().toISOString().slice(0,10)}.json`;a.click();
+      URL.revokeObjectURL(url);
+      setAviso("Exportação de dados concluída. Este arquivo não é um backup restaurável completo do Supabase; guarde-o em local seguro.");
+    }catch(e){setAviso(e instanceof Error?e.message:"Não foi possível exportar.");}
+    finally{setBackupOcupado(false);}
+  }
+  async function abrirRelatorio(tipo:string){
+    setMenuSuperior(null);setRelatorioAberto(tipo);setRelatorioDados([]);setRelatorioErro("");setRelatorioCarregando(true);
+    try{
+      if(!supabase)throw new Error("Conexão indisponível.");
+      const {data:{session}}=await supabase.auth.getSession();
+      if(!session)throw new Error("Sessão expirada.");
+      const res=await fetch("/api/relatorios?tipo="+encodeURIComponent(tipo),{headers:{Authorization:`Bearer ${session.access_token}`},cache:"no-store"});
+      const d=await res.json();if(!res.ok)throw new Error(d.error||"Falha ao consultar relatório.");
+      setRelatorioDados(d.registros||[]);
+    }catch(e){setRelatorioErro(e instanceof Error?e.message:"Erro na consulta.");}
+    finally{setRelatorioCarregando(false);}
+  }
+  function abrirLancamento(tipo:string){
+    setMenuSuperior(null);
+    if(tipo==="contas"){abrirJanela("despesas");return;}
+    if(tipo==="movimentacao"){abrirJanela("caixa");return;}
+    if(tipo==="segunda_via"){router.push("/pdv?acao=consulta");return;}
+    if(tipo==="cancelamento"){router.push("/pdv?acao=cancelamento");return;}
+  }
+  useEffect(()=>{
+    if(!supabase||!empresaId)return;
+    let ativo=true;
+    async function atualizar(){
+      if(!supabase)return;
+      const hoje=new Intl.DateTimeFormat("en-CA",{timeZone:"America/Sao_Paulo",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date());
+      const mes=hoje.slice(0,7);
+      const [ano,numeroMes]=mes.split("-").map(Number);
+      const inicioHoje=new Date(hoje+"T00:00:00-03:00").toISOString();
+      const inicioMes=new Date(`${mes}-01T00:00:00-03:00`).toISOString();
+      const fimMes=new Date(Date.UTC(ano,numeroMes,1,3)).toISOString();
+      const [vendasDia,vendasMes,estoque]=await Promise.all([
+        supabase.from("vendas").select("id",{count:"exact",head:true}).eq("empresa_id",empresaId).eq("situacao","concluida").gte("criada_em",inicioHoje),
+        supabase.from("vendas").select("total").eq("empresa_id",empresaId).eq("situacao","concluida").gte("criada_em",inicioMes).lt("criada_em",fimMes).limit(10000),
+        supabase.from("produtos").select("estoque_atual").eq("empresa_id",empresaId).eq("ativo",true).limit(10000)
+      ]);
+      if(ativo&&!vendasDia.error&&!vendasMes.error&&!estoque.error)
+        setKpis({vendas:vendasDia.count||0,faturamento:(vendasMes.data||[]).reduce((a,v)=>a+Number(v.total||0),0),estoque:(estoque.data||[]).reduce((a,v)=>a+Number(v.estoque_atual||0),0)});
+    }
+    void atualizar();return()=>{ativo=false};
+  },[empresaId]);
   useEffect(() => {
     if (!cadastrosMenuAberto) return;
     const click = (e: MouseEvent) => {
@@ -167,18 +230,16 @@ export default function Dashboard() {
           notasEntradaAbertas || menuNotasAberto || cadastroAberto || historicoAberto || caixaAberto) return;
       const alvo = event.target as HTMLElement | null;
       if (alvo?.closest("input, textarea, select, [contenteditable='true']")) return;
-      const destinos: Record<string, string> = { F2: "/pdv" };
-      if (destinos[event.key]) {
-        event.preventDefault();
-        window.location.assign(destinos[event.key]);
-      } else if (event.key === "F3") {
+
+      if(event.key==="F1"){event.preventDefault();abrirJanela("produtos");return;}
+      if(event.key==="F2"){event.preventDefault();abrirJanela("clientes");return;}
+      if (event.key === "F3") {
         event.preventDefault(); abrirJanela("caixa");
       } else if (event.key === "F4") {
         event.preventDefault(); setFinanceiroAberto(true);
       } else if (event.key === "F7") {
-        event.preventDefault(); setAviso("Backup: módulo ainda em desenvolvimento. Nenhum dado foi alterado.");
-      } else if (event.key === "F5") {
-        event.preventDefault(); abrirJanela("fornecedores");
+        event.preventDefault(); void exportarBackup();
+
       } else if (event.key === "F6") {
         event.preventDefault(); abrirJanela("notas");
       }
@@ -454,7 +515,6 @@ export default function Dashboard() {
         <button className="ev-top-exit" type="button" onClick={sair} disabled={saindo}><Icon name="logout" size={19}/>{saindo ? "Saindo..." : "Sair"}</button>
       </div>
     </header>
-    {empresaId && <RecuperacoesPainel empresaId={empresaId} />}
     <nav className="ev-tabs" aria-label="Menu superior">
       <div className="ev-cadastros-anchor">
         <button type="button" className={aba==="Cadastros"?"active":""} aria-expanded={cadastrosMenuAberto} aria-haspopup="menu" onClick={()=>{setAba("Cadastros");setAviso("");setCadastrosMenuAberto(v=>!v)}}>Cadastros <span aria-hidden="true">▾</span></button>
@@ -462,11 +522,23 @@ export default function Dashboard() {
           {([["usuarios","Cadastro de administradores e vendedores","♧"],["clientes","Cadastro de clientes","♙"],["despesas","Cadastro de Despesas","▤"],["fornecedores","Cadastro de fornecedores","▤"],["pagamentos","Cadastro de formas de pagamento","▦"],["taxas_cartoes","Cadastro de taxas de cartões","▦"],["empresa","Cadastro de informações da empresa","⌂"],["produtos","Cadastro de produtos","▣"]] as const).map(([acao,titulo,icone])=><button key={acao} type="button" role="menuitem" onClick={()=>abrirCadastroMenu(acao)}><span className="ev-cadastros-icone" aria-hidden="true">{icone}</span><span>{titulo}</span></button>)}
         </div>}
       </div>
-      {["Lançamentos", "Relatórios", "Gráficos", "Utilitários", "Ajuda"].map(item => <button type="button" key={item} className={aba === item ? "active" : ""} onClick={() => { setCadastrosMenuAberto(false);setAba(item);setAviso(`A seção ${item} será implementada em uma próxima etapa.`); }}>{item}</button>)}
+      {(["Lançamentos","Relatórios"] as const).map(item=><div key={item} className="ev-cadastros-anchor">
+        <button type="button" className={menuSuperior===item?"active":""} onClick={()=>{setCadastrosMenuAberto(false);setMenuSuperior(v=>v===item?null:item);setAba(item)}}>{item} ▾</button>
+        {menuSuperior===item&&<div className="ev-cadastros-menu" role="menu">
+          {item==="Lançamentos"?<>
+            <button onClick={()=>abrirLancamento("contas")}>Contas a pagar e a receber</button>
+            <button onClick={()=>abrirLancamento("segunda_via")}>Imprimir 2ª via de recibo de venda</button>
+            <button onClick={()=>abrirLancamento("cancelamento")}>Cancelar venda realizada</button>
+            <button onClick={()=>abrirLancamento("movimentacao")}>Movimentação de caixa</button>
+          </>:<>
+            {([["vendas","Relatório geral de movimentação em vendas"],["pendentes","Pagamentos pendentes da empresa"],["balancete","Balanço e balancete financeiro"],["acessos","Histórico de acesso ao sistema"],["informacoes","Informações gerais"]] as const).map(([tipo,titulo])=><button key={tipo} onClick={()=>void abrirRelatorio(tipo)}>{titulo}</button>)}
+          </>}
+        </div>}
+      </div>)}
     </nav>
     <div className="ev-toolbar" role="navigation" aria-label="Acesso rápido">
       <div className="ev-toolbar-scroll">
-        {menu.map(item => <button type="button" key={item.label} title={item.detail} onClick={() => { if (item.label === "Produtos") { abrirJanela("produtos"); } else if (item.label === "Clientes") { abrirJanela("clientes"); } else if (item.label === "Vender (PDV)") { router.push("/pdv"); } else if (item.label === "Caixa") { abrirJanela("caixa"); } else if (item.label === "Financeiro") { setFinanceiroAberto(true); } else if (item.label === "Compras") { abrirJanela("fornecedores"); } else if (item.label === "Notas Fiscais") { abrirJanela("notas"); } else setAviso(`${item.label}: módulo ainda em desenvolvimento. Nenhum dado foi alterado.`); }}><Icon name={item.icon} size={30}/><span>{item.label}</span>{({"Vender (PDV)":"F2","Caixa":"F3","Financeiro":"F4","Compras":"F5","Notas Fiscais":"F6","Backup":"F7"} as Record<string,string>)[item.label] && <small className="ev-toolbar-hotkey">{({"Vender (PDV)":"F2","Caixa":"F3","Financeiro":"F4","Compras":"F5","Notas Fiscais":"F6","Backup":"F7"} as Record<string,string>)[item.label]}</small>}</button>)}
+        {menu.map(item => <button type="button" key={item.label} title={item.detail} onClick={() => { if (item.label === "Produtos") { abrirJanela("produtos"); } else if (item.label === "Clientes") { abrirJanela("clientes"); } else if (item.label === "Vender (PDV)") { router.push("/pdv"); } else if (item.label === "Caixa") { abrirJanela("caixa"); } else if (item.label === "Financeiro") { setFinanceiroAberto(true); } else if (item.label === "Notas Fiscais") { abrirJanela("notas"); } else if(item.label==="Backup"){void exportarBackup();}else setAviso(`${item.label}: módulo ainda em desenvolvimento.`); }}><Icon name={item.icon} size={30}/><span>{item.label}</span>{({"Produtos":"F1","Clientes":"F2","Caixa":"F3","Financeiro":"F4","Notas Fiscais":"F6","Backup":"F7"} as Record<string,string>)[item.label] && <small className="ev-toolbar-hotkey">{({"Produtos":"F1","Clientes":"F2","Caixa":"F3","Financeiro":"F4","Notas Fiscais":"F6","Backup":"F7"} as Record<string,string>)[item.label]}</small>}</button>)}
         <button type="button" onClick={sair} disabled={saindo}><Icon name="logout" size={30}/><span>Sair</span></button>
       </div>
     </div>
@@ -476,15 +548,15 @@ export default function Dashboard() {
         {aviso && <div className="ev-info" role="status"><span>{aviso}</span><button type="button" onClick={() => setAviso("")} aria-label="Fechar aviso">×</button></div>}
         {pendente && <div className="ev-pending"><strong>Cadastro da empresa incompleto.</strong> Complete os dados quando puder. <Link href="/completar-cadastro">Completar cadastro →</Link></div>}
         <div className="ev-kpis">
-          <article><span className="ev-kpi-icon blue"><Icon name="cart"/></span><div><span>Vendas (hoje)</span><strong>—</strong><small>Sem módulo de vendas</small></div></article>
-          <article><span className="ev-kpi-icon green"><Icon name="wallet"/></span><div><span>Faturamento (mês)</span><strong>—</strong><small>Dados indisponíveis</small></div></article>
-          <article><span className="ev-kpi-icon amber"><Icon name="layers"/></span><div><span>Produtos em estoque</span><strong>—</strong><small>Estoque não configurado</small></div></article>
-          <article><span className="ev-kpi-icon purple"><Icon name="file"/></span><div><span>Notas fiscais (mês)</span><strong>—</strong><small>Módulo não configurado</small></div></article>
+          <article role="button" tabIndex={0} onClick={()=>router.push("/pdv?acao=consulta")} onKeyDown={e=>{if(e.key==="Enter")router.push("/pdv?acao=consulta")}} style={{cursor:"pointer"}}><span className="ev-kpi-icon blue"><Icon name="cart"/></span><div><span>Vendas (hoje)</span><strong>{kpis?kpis.vendas:"—"}</strong><small>Abrir consulta de vendas</small></div></article>
+          <article role="button" tabIndex={0} onClick={()=>setFinanceiroAberto(true)} onKeyDown={e=>{if(e.key==="Enter")setFinanceiroAberto(true)}} style={{cursor:"pointer"}}><span className="ev-kpi-icon green"><Icon name="wallet"/></span><div><span>Faturamento (mês)</span><strong>{kpis?moeda(kpis.faturamento):"—"}</strong><small>Abrir financeiro</small></div></article>
+          <article role="button" tabIndex={0} onClick={()=>abrirJanela("produtos")} onKeyDown={e=>{if(e.key==="Enter")abrirJanela("produtos")}} style={{cursor:"pointer"}}><span className="ev-kpi-icon amber"><Icon name="layers"/></span><div><span>Produtos em estoque</span><strong>{kpis?kpis.estoque.toLocaleString("pt-BR"):"—"}</strong><small>Abrir cadastro de produtos</small></div></article>
         </div>
-        <div className="ev-bottom-grid"><article className="ev-card"><h2><Icon name="layers" size={22}/> Movimentações recentes</h2><div className="ev-table"><div className="ev-table-head"><span>Data</span><span>Descrição</span><span>Valor</span></div><div className="ev-empty"><Icon name="file" size={33}/><p>O histórico de movimentações estará disponível quando os módulos operacionais forem implementados.</p></div></div></article><article className="ev-card"><h2><Icon name="bell" size={22}/> Avisos e pendências</h2><div className="ev-alert-body"><p>{pendente ? "Há informações pendentes no cadastro da empresa." : "Os avisos operacionais aparecerão quando os módulos forem configurados."}</p><Link href="/completar-cadastro">Dados da empresa →</Link></div></article></div>
+        <div className="ev-bottom-grid"><article className="ev-card"><h2><Icon name="layers" size={22}/> Movimentações recentes</h2><div className="ev-table"><div className="ev-table-head"><span>Data</span><span>Descrição</span><span>Valor</span></div><div className="ev-empty"><Icon name="file" size={33}/><p>O histórico de movimentações estará disponível quando os módulos operacionais forem implementados.</p></div></div></article><article className="ev-card"><h2><Icon name="bell" size={22}/> Avisos e pendências</h2><div className="ev-alert-body"><p>{pendente ? "Há informações pendentes no cadastro da empresa." : "Os avisos operacionais aparecerão quando os módulos forem configurados."}</p><Link href="/completar-cadastro">Dados da empresa →</Link>{empresaId&&<RecuperacoesPainel empresaId={empresaId}/>}</div></article></div>
       </>}
     </section>
-    {pagamentosAberto && <FormasPagamentoModal onClose={() => setPagamentosAberto(false)} />}
+    {relatorioAberto&&<div className="ev-product-overlay" onMouseDown={e=>{if(e.target===e.currentTarget)setRelatorioAberto("")}}><section className="ev-product-window" style={{maxWidth:900,width:"95%",background:"#fff",borderRadius:14,overflow:"hidden"}} role="dialog" aria-modal="true"><div className="ev-product-heading"><h2>{({vendas:"Relatório geral de movimentação em vendas",pendentes:"Pagamentos pendentes da empresa",balancete:"Balanço e balancete financeiro",acessos:"Histórico de acesso ao sistema",informacoes:"Informações gerais"} as Record<string,string>)[relatorioAberto]}</h2><button onClick={()=>setRelatorioAberto("")} aria-label="Fechar">×</button></div><div style={{padding:20,maxHeight:"65vh",overflow:"auto"}}>{relatorioAberto==="balancete"&&<p style={{color:"#9a3412",fontSize:13}}>Demonstrativo gerencial simplificado. Não substitui balanço patrimonial ou balancete contábil.</p>}{relatorioCarregando?<p>Carregando...</p>:relatorioErro?<p role="alert">{relatorioErro}</p>:relatorioDados.length?<table style={{width:"100%",fontSize:13}}><thead><tr>{Object.keys(relatorioDados[0]).map(k=><th key={k} style={{textAlign:"left",padding:8}}>{k}</th>)}</tr></thead><tbody>{relatorioDados.map((r,i)=><tr key={i}>{Object.values(r).map((v,j)=><td key={j} style={{padding:8,borderBottom:"1px solid #ddd"}}>{String(v??"—")}</td>)}</tr>)}</tbody></table>:<p>Nenhum registro encontrado.</p>}</div></section></div>}
+        {pagamentosAberto && <FormasPagamentoModal onClose={() => setPagamentosAberto(false)} />}
     {financeiroAberto && <FinanceiroModal onClose={() => setFinanceiroAberto(false)} />}
     {usuariosAberto && <UsuariosModal empresaId={empresaId} onClose={()=>setUsuariosAberto(false)}/>}
     {empresaAberta && <div className="ev-product-overlay ev-empresa-overlay" ><section className="ev-empresa-window" role="dialog" aria-modal="true" aria-label="Cadastro de Informações da Empresa"><CompletarCadastro embutido onClose={()=>setEmpresaAberta(false)}/></section></div>}

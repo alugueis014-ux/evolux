@@ -654,6 +654,7 @@ export default function PDV() {
     finally{setHistoricoCarregando(false);}
   }
   function abrirHistorico(){setHistoricoAberto(true);setHistoricoDetalhe(null);setHistoricoPeriodo(turno?"turno":"hoje");setHistoricoBusca("");void carregarHistorico();}
+
   async function abrirDetalheHistorico(venda:Record<string,unknown>){
     if(!supabase||!empresaId)return;
     setHistoricoDetalhe(venda);setHistoricoItens([]);setHistoricoPagamentos([]);setHistoricoDetalheErro("");setHistoricoDetalheCarregando(true);
@@ -808,6 +809,14 @@ export default function PDV() {
   const [operador, setOperador] = useState("ADMINISTRADOR");
   const [perfilFuncionario, setPerfilFuncionario] = useState<"administrador"|"vendedor"|null>(null);
   const [empresaId, setEmpresaId] = useState("");
+  useEffect(()=>{
+    if(!empresaId)return;
+    const acao=new URLSearchParams(window.location.search).get("acao");
+    if(acao==="consulta")abrirHistorico();
+    if(acao==="cancelamento")abrirCancelamentos();
+    if(acao==="consulta"||acao==="cancelamento")window.history.replaceState(null,"",window.location.pathname);
+  // Executar apenas quando a empresa for identificada.
+  },[empresaId]);
   const [empresa, setEmpresa] = useState("EVOLUX");
   const [dadosEmpresaCupom,setDadosEmpresaCupom] = useState<Record<string,unknown>>({});
   const [carrinho, setCarrinho] = useState<Linha[]>([]);
