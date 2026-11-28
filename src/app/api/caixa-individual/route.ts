@@ -27,7 +27,44 @@ async function handle(req:NextRequest,method:'GET'|'POST'){
   if(action==='turno'){
    const {data,error}=await admin.from('caixa_turnos').select('id,numero,saldo_inicial,aberto_em,operador_id').eq('empresa_id',f.empresaId).eq('funcionario_id',f.funcionarioId).eq('situacao','aberto').maybeSingle();
    if(error)throw new Error(error.message);
-   return NextResponse.json({turno:data,funcionario:f.nome},{headers});
+   return NextResponse.json({turno:data,funcionario:f.nome,papel:f.papel,empresaId:f.empresaId,usuarioId:c.user.id},{headers});
+  }
+  if(action==='abertos'||action==='detalhe_aberto'){
+   if(f.papel!=='administrador')return fail('Acesso restrito à administração',403);
+   if(action==='abertos'){
+    const {data,error}=await admin.from('caixa_turnos').select('id,numero,saldo_inicial,aberto_em,funcionario_id').eq('empresa_id',f.empresaId).eq('situacao','aberto').order('aberto_em',{ascending:false});
+    if(error)throw new Error(error.message);
+    const ids=[...new Set((data||[]).map(t=>t.funcionario_id).filter(Boolean))];
+    const nomes=new Map<string,string>();
+    if(ids.length){const r=await admin.from('evolux_funcionarios').select('id,nome').eq('empresa_id',f.empresaId).in('id',ids);if(r.error)throw new Error(r.error.message);for(const x of r.data||[])nomes.set(x.id,x.nome);}
+    return NextResponse.json({caixas:(data||[]).map(t=>({...t,operador_nome:nomes.get(t.funcionario_id)||'Operador não identificado'}))},{headers});
+   }
+   const id=String(body.turno_id||'');
+   const t=await admin.from('caixa_turnos').select('id,numero,saldo_inicial,aberto_em').eq('id',id).eq('empresa_id',f.empresaId).eq('situacao','aberto').maybeSingle();
+   if(t.error)throw new Error(t.error.message);if(!t.data)return fail('Turno aberto não encontrado',404);
+   const r=await usuario.rpc('evolux_resumo_caixa',{p_caixa_turno_id:id});if(r.error)return fail(r.error.message);if(!r.data)return fail('Resumo indisponível',500);
+   const vendas:Record<string,unknown>[]=[];
+   for(let offset=0;;offset+=500){const v=await admin.from('vendas').select('id,numero,total,criada_em').eq('empresa_id',f.empresaId).eq('caixa_turno_id',id).eq('situacao','concluida').order('id').range(offset,offset+499);if(v.error)throw new Error(v.error.message);vendas.push(...(v.data||[]));if((v.data||[]).length<500)break;}
+   const totais={dinheiro:0,pix:0,credito:0,debito:0,cartao_sem_modalidade:0,outros:0};
+   const pagamentos=new Map<string,Record<string,unknown>[]>();
+   for(let i=0;i<vendas.length;i+=100){const ids=vendas.slice(i,i+100).map(v=>String(v.id));for(let offset=0;;offset+=500){const p=await admin.from('venda_pagamentos').select('id,venda_id,forma,valor,modalidade,bandeira,parcelas').in('venda_id',ids).order('id').range(offset,offset+499);if(p.error)throw new Error(p.error.message);for(const x of p.data||[]){const k=x.forma==='dinheiro'?'dinheiro':x.forma==='pix'?'pix':x.forma==='cartao'?(x.modalidade==='credito'?'credito':x.modalidade==='debito'?'debito':'cartao_sem_modalidade'):'outros';totais[k]+=Math.round(Number(x.valor)*100);const lista=pagamentos.get(x.venda_id)||[];lista.push(x);pagamentos.set(x.venda_id,lista);}if((p.data||[]).length<500)break;}}
+   return NextResponse.json({turno:t.data,resumo:r.data,totais:Object.fromEntries(Object.entries(totais).map(([k,v])=>[k,v/100])),total_vendas:vendas.reduce((a,v)=>a+Math.round(Number(v.total)*100),0)/100,vendas:vendas.sort((a,b)=>String(b.criada_em).localeCompare(String(a.criada_em))).map(v=>({...v,pagamentos:pagamentos.get(String(v.id))||[]}))},{headers});
+  }
+  if(action==='estornos'||action==='confirmar_estorno'){
+   if(f.papel!=='administrador')return fail('Acesso restrito à administração',403);
+   if(action==='estornos'){
+    const {data,error}=await admin.from('venda_cancelamentos').select('id,venda_id,valor_original,pagamentos_originais,motivo,criado_em').eq('empresa_id',f.empresaId).eq('situacao_estorno','pendente').order('criado_em',{ascending:false}).limit(100);
+    if(error)return fail(error.message);
+    const ids=(data||[]).map(x=>x.venda_id);
+    const vendas=ids.length?await admin.from('vendas').select('id,numero,caixa_turno_id').eq('empresa_id',f.empresaId).in('id',ids):{data:[],error:null};
+    if(vendas.error)return fail(vendas.error.message);
+    const mapa=new Map((vendas.data||[]).map(v=>[v.id,v]));
+    return NextResponse.json({estornos:(data||[]).map(x=>({...x,venda:mapa.get(x.venda_id)?.numero??null}))},{headers});
+   }
+   const id=String(body.cancelamento_id||'');const obs=String(body.observacao||'').trim();
+   if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)||obs.length<5||obs.length>1000||body.confirmado!==true)return fail('Confirmação ou justificativa inválida');
+   const {data,error}=await admin.rpc('evolux_confirmar_estorno_individual',{p_cancelamento_id:id,p_empresa_id:f.empresaId,p_funcionario_id:f.funcionarioId,p_usuario_auth_id:c.user.id,p_observacao:obs});
+   if(error)return fail(error.message);return NextResponse.json(data,{headers});
   }
   if(action==='abrir'){
    const valor=Number(body.saldo_inicial);
@@ -37,7 +74,7 @@ async function handle(req:NextRequest,method:'GET'|'POST'){
    return NextResponse.json({turno:data},{headers});
   }
   if(action==='enviar'){
-   const {data,error}=await usuario.rpc('evolux_caixa_enviar_individual',{p_turno_id:body.turno_id,p_funcionario_id:f.funcionarioId,p_usuario_auth_id:c.user.id,p_dinheiro:body.dinheiro,p_pix:body.pix,p_cartao:body.cartao,p_justificativa:body.justificativa||null});
+   const {data,error}=await admin.rpc('evolux_caixa_enviar_individual',{p_turno_id:body.turno_id,p_funcionario_id:f.funcionarioId,p_usuario_auth_id:c.user.id,p_dinheiro:body.dinheiro,p_pix:body.pix,p_cartao:body.cartao,p_justificativa:body.justificativa||null});
    if(error)return fail(error.message);return NextResponse.json(data,{headers});
   }
   if(action==='decidir'){
@@ -68,11 +105,11 @@ async function handle(req:NextRequest,method:'GET'|'POST'){
   }
   if(action==='comprovante_historico'){
    if(f.papel!=='administrador')return fail('Somente o administrador pode reimprimir o fechamento completo',403);
-   const numero=Number(body.numero);
-   if(!Number.isSafeInteger(numero)||numero<=0)return fail('Número de turno inválido');
+   const turnoId=String(body.turno_id||'');
+   if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(turnoId))return fail('Identificador de turno inválido');
    const {data:turno,error:et}=await admin.from('caixa_turnos')
     .select('id,numero,empresa_id,funcionario_id,situacao,fechado_em')
-    .eq('empresa_id',f.empresaId).eq('numero',numero).maybeSingle();
+    .eq('empresa_id',f.empresaId).eq('id',turnoId).maybeSingle();
    if(et)return fail(et.message,500);
    if(!turno||turno.situacao!=='fechado'||!turno.fechado_em)return fail('Fechamento não encontrado',404);
    // A API ja validou o JWT, o PIN e a empresa do administrador.

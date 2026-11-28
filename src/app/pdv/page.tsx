@@ -35,12 +35,49 @@ export default function PDV() {
     return bloqueado;
   }
   useEffect(()=>{
-    if(!turno){setCaixaEmConferencia(false);return;}
+    if(!turno){setCaixaEmConferencia(false);setVerificandoConferencia(false);return;}
+    const turnoId=turno.id;
     let ativo=true;
+    let consultando=false;
+    let ultimoStatus="";
     setVerificandoConferencia(true);
-    void verificarConferencia(turno.id).catch(()=>{if(ativo)setCaixaEmConferencia(true);})
-      .finally(()=>{if(ativo)setVerificandoConferencia(false);});
-    return ()=>{ativo=false;};
+    async function atualizarSituacao(){
+      if(!ativo||consultando||!supabase)return;
+      consultando=true;
+      try{
+        const {data,error}=await supabase.rpc("evolux_status_caixa",{p_caixa_turno_id:turnoId});
+        if(error)throw error;
+        const status=String(data?.status||"");
+        // Confirma o turno ativo pelo mesmo endpoint usado na abertura do PDV.
+        const resposta=await caixaIndividual("turno");
+        if(!ativo)return;
+        if(resposta.turno===null){
+          setTurno(atual=>atual?.id===turnoId?null:atual);
+          setFechamentoAberto(false);setFechamentoStatus("");setFechamentoErro("");
+          setErroCaixa("");setTelaVenda(false);
+          return;
+        }
+        if(resposta.turno?.id!==turnoId){setCaixaEmConferencia(true);return;}
+        setCaixaEmConferencia(status!=="novo");
+        if(status==="pendente")setFechamentoStatus("Contagem já enviada. Aguarde a decisão do supervisor.");
+        else if(status==="devolvido"||status==="recusado"){
+          setFechamentoStatus("");
+          if(ultimoStatus!==status){
+            setErroCaixa("Contagem devolvida pelo supervisor. Realize a recontagem pelo fechamento de caixa (F10).");
+            setFechamentoErro("Contagem devolvida pelo supervisor. Realize a recontagem.");
+          }
+        }
+        ultimoStatus=status;
+      }catch{
+        if(ativo)setCaixaEmConferencia(true);
+      }finally{
+        consultando=false;
+        if(ativo)setVerificandoConferencia(false);
+      }
+    }
+    void atualizarSituacao();
+    const timer=window.setInterval(()=>void atualizarSituacao(),5000);
+    return ()=>{ativo=false;window.clearInterval(timer);};
   },[turno?.id]);
 
   const [abertura, setAbertura] = useState<"pergunta"|"formulario"|null>(null);
@@ -269,6 +306,7 @@ export default function PDV() {
     }catch(e){setCancelamentoErro(e instanceof Error?e.message:"Falha ao consultar administradores");}
   }
   async function validarAdministradorCancelamento(){
+    setFinanceiraModo(null);
     if(!supabase||!empresaId||!adminCancelamentoId||adminCancelamentoPin.length<3||validandoAdminCancelamento)return;
     setValidandoAdminCancelamento(true);setCancelamentoErro("");
     try{
@@ -342,6 +380,7 @@ export default function PDV() {
     finally{setCancelamentoCarregando(false);}
   }
   async function selecionarVendaCancelamento(venda:Record<string,unknown>){
+    setFinanceiraModo(null);setFinanceiraErro("");
     if(!supabase||cancelamentoCarregando)return;
     setCancelamentoCarregando(true);setCancelamentoErro("");setCancelamentoSucesso("");
     setCancelamentoVenda(null);setCancelamentoItens([]);setCancelamentoPagamentos([]);setCancelamentoMotivo("");setAutorizacaoCancelamentoAberta(false);setCancelamentoAutorizado(false);setAdminCancelamentoPin("");
@@ -511,9 +550,70 @@ export default function PDV() {
   const [pinItemId,setPinItemId]=useState("");
   const [pagamentoPendente,setPagamentoPendente]=useState<Record<string,unknown>|null>(null);
   const [pagamentoCredencial,setPagamentoCredencial]=useState<{administrador:string;pin:string;vendaId:string}|null>(null);
+  const [remota,setRemota]=useState<{id:string;operacao:string;referencia:string;dados:object}|null>(null);
+  function dadosRemotos(){return {turno:turno?.id||null,itens:carrinho.map(l=>({id:l.produto.id,descricao:l.produto.descricao,quantidade:l.quantidade,preco:l.produto.preco_venda}))};}
+  const dadosRemotosRef=useRef(dadosRemotos);dadosRemotosRef.current=dadosRemotos;
+  async function apiRemota(body?:object,id?:string){
+    if(!supabase)throw new Error("Conexão indisponível.");
+    const {data:{session}}=await supabase.auth.getSession();if(!session)throw new Error("Sessão expirada.");
+    const r=await fetch("/api/autorizacoes-remotas"+(id?"?id="+encodeURIComponent(id):""),{method:body?"POST":"GET",headers:{Authorization:`Bearer ${session.access_token}`,"Content-Type":"application/json"},cache:"no-store",...(body?{body:JSON.stringify(body)}:{})});
+    const d=await r.json();if(!r.ok)throw new Error(d.error||"Falha na autorização.");return d;
+  }
+  const [financeiraAdmin,setFinanceiraAdmin]=useState("");
+  const [financeiraModo,setFinanceiraModo]=useState<"cancelar_venda"|"corrigir_pagamento"|null>(null);
+  const [financeiraPedido,setFinanceiraPedido]=useState<{id:string;operacao:string;referencia:string}|null>(null);
+  const [financeiraErro,setFinanceiraErro]=useState("");
+  const [financeiraOcupada,setFinanceiraOcupada]=useState(false);
+  const financeiraLock=useRef(false);
+  async function solicitarFinanceira(operacao:"cancelar_venda"|"corrigir_pagamento",referencia:string,dados:object){
+    if(financeiraLock.current||financeiraPedido||!financeiraAdmin)return;
+    financeiraLock.current=true;setFinanceiraOcupada(true);setFinanceiraErro("");
+    try{const r=await apiRemota({acao:"solicitar",administradorId:financeiraAdmin,operacao,referencia,dados});setFinanceiraPedido({id:r.solicitacao.id,operacao,referencia});}
+    catch(e){setFinanceiraErro(e instanceof Error?e.message:"Falha na solicitação.");}
+    finally{financeiraLock.current=false;setFinanceiraOcupada(false);}
+  }
+  useEffect(()=>{
+    if(!financeiraPedido)return;let ativo=true;
+    async function consultar(){if(!ativo||financeiraLock.current||!financeiraPedido)return;financeiraLock.current=true;
+      try{const r=await apiRemota(undefined,financeiraPedido.id);if(!ativo)return;const status=r.solicitacoes[0]?.status;
+        if(status==="aprovada"||status==="utilizada"){
+          await apiRemota({acao:"executar_financeiro",id:financeiraPedido.id});if(!ativo)return;
+          setFinanceiraPedido(null);setFinanceiraModo(null);setFinanceiraErro("");
+          if(financeiraPedido.operacao==="cancelar_venda"){
+            setCancelamentoResultados(a=>a.map(v=>String(v.id)===financeiraPedido.referencia?{...v,situacao:"cancelada"}:v));
+            setHistoricoVendas(a=>a.map(v=>String(v.id)===financeiraPedido.referencia?{...v,situacao:"cancelada"}:v));
+            setCancelamentoVenda(null);setCancelamentoAutorizado(false);setCancelamentoSucesso("Venda cancelada. Estoque devolvido; estorno pendente.");
+            if(supabase&&empresaId){const q=await carregarProdutosAtivos(supabase,empresaId,"id,codigo,descricao,codigo_barras,preco_custo,preco_venda,estoque_atual,ativo");if(!q.error&&ativo)setProdutos((q.data||[]) as Produto[]);}
+          }else{setCorrecaoVenda(null);setPagamentoCredencial(null);setHistoricoDetalhe(null);void carregarHistorico();}
+          window.alert("Operação autorizada e concluída.");
+        }else if(status!=="pendente"){setFinanceiraPedido(null);setFinanceiraErro("Solicitação "+(status||"indisponível")+".");}
+      }catch(e){if(ativo)setFinanceiraErro(e instanceof Error?e.message:"Falha na consulta.");}finally{financeiraLock.current=false;}}
+    const t=window.setInterval(()=>void consultar(),3000);void consultar();return()=>{ativo=false;window.clearInterval(t);};
+  },[financeiraPedido]);
+  async function cancelarFinanceira(){if(!financeiraPedido||financeiraLock.current)return;financeiraLock.current=true;try{await apiRemota({acao:"cancelar",id:financeiraPedido.id});setFinanceiraPedido(null);setFinanceiraErro("");}catch(e){setFinanceiraErro(e instanceof Error?e.message:"Falha ao cancelar.");}finally{financeiraLock.current=false;}}
+  async function solicitarRemota(){
+    if(pinProcessando||remota||!pinAdminId||(pinAcao!=="apagar"&&pinAcao!=="cancelar_lancamento"))return;
+    setPinProcessando(true);setPinErro("");
+    try{const operacao=pinAcao==="apagar"?"apagar_item":"cancelar_lancamento",referencia=pinAcao==="apagar"?pinItemId:"carrinho",dados=dadosRemotos();const r=await apiRemota({acao:"solicitar",administradorId:pinAdminId,operacao,referencia,dados});setRemota({id:r.solicitacao.id,operacao,referencia,dados});}catch(e){setPinErro(e instanceof Error?e.message:"Falha na solicitação.");}finally{setPinProcessando(false);}
+  }
+  useEffect(()=>{
+    if(!remota)return;let ativo=true;let ocupado=false;
+    async function consultar(){if(!ativo||ocupado||!remota)return;ocupado=true;
+      try{const r=await apiRemota(undefined,remota.id);if(!ativo)return;const status=r.solicitacoes[0]?.status;
+        if(status==="aprovada"){
+          if(JSON.stringify(dadosRemotosRef.current())!==JSON.stringify(remota.dados)){await apiRemota({acao:"cancelar",id:remota.id});if(ativo){setRemota(null);setPinErro("O lançamento mudou. Solicite novamente.");}return;}
+          await apiRemota({acao:"consumir",...remota});if(!ativo)return;
+          if(JSON.stringify(dadosRemotosRef.current())!==JSON.stringify(remota.dados)){setRemota(null);setPinErro("O lançamento mudou. Solicite novamente.");return;}
+          if(remota.operacao==="apagar_item"){setCarrinho(a=>a.filter(l=>l.produto.id!==remota.referencia));setItemSelecionado(null);}else{setCarrinho([]);setBusca("");setItemSelecionado(null);setProdutoPendente(null);setTelaVenda(false);}
+          setRemota(null);setPinAcao(null);setPinValor("");setPinErro("");
+        }else if(status!=="pendente"){setRemota(null);setPinErro("Solicitação "+(status||"indisponível")+". Tente novamente.");}
+      }catch(e){if(ativo)setPinErro(e instanceof Error?e.message:"Falha na consulta.");}finally{ocupado=false;}}
+    const timer=window.setInterval(()=>void consultar(),3000);void consultar();return()=>{ativo=false;window.clearInterval(timer);};
+  },[remota]);
+  async function cancelarRemota(){if(!remota||pinProcessando)return;setPinProcessando(true);try{await apiRemota({acao:"cancelar",id:remota.id});setRemota(null);setPinErro("");}catch(e){setPinErro(e instanceof Error?e.message:"Falha ao cancelar.");}finally{setPinProcessando(false);}}
   async function pedirAutorizacao(acao:"apagar"|"pagamento"|"cancelar_lancamento",produtoId=""){
     if(!supabase||!empresaId)return;
-    setPinAcao(acao);setPinItemId(produtoId);setPinValor("");setPinErro("");setPinAdmins([]);setPinAdminId("");setPinMostrar(false);
+    setFinanceiraModo(null);setFinanceiraErro("");setPinAcao(acao);setPinItemId(produtoId);setPinValor("");setPinErro("");setPinAdmins([]);setPinAdminId("");setPinMostrar(false);
     try{
       const {data:{session}}=await supabase.auth.getSession();
       if(!session)throw new Error("Sessão expirada.");
@@ -526,7 +626,7 @@ export default function PDV() {
     }catch(e){setPinErro(e instanceof Error?e.message:"Falha ao consultar administradores.");}
   }
   async function confirmarAutorizacao(){
-    if(!supabase||!pinAcao||!pinAdminId||pinValor.length<3||pinProcessando)return;
+    if(!supabase||!pinAcao||!pinAdminId||pinValor.length<3||pinProcessando||remota)return;
     setPinProcessando(true);setPinErro("");
     try{
       if(pinAcao==="apagar"||pinAcao==="cancelar_lancamento"){
@@ -621,17 +721,18 @@ export default function PDV() {
   }
   async function salvarCorrecao(){
     if(!supabase||!correcaoValida||!correcaoVenda||correcaoErro||correcaoSalvando)return;
-    if(!pagamentoCredencial||pagamentoCredencial.vendaId!==String(correcaoVenda.id)){
-      setCorrecaoErro("Autorização expirada. Feche e solicite novamente.");return;
-    }
-    setCorrecaoSalvando(true);setCorrecaoErro("");
-    try{
       const novosPagamentos=[
         {forma:"dinheiro",valor:correcaoCentavos(correcaoValores.dinheiro)/100},
         {forma:"pix",valor:correcaoCentavos(correcaoValores.pix)/100},
         {forma:"cartao",modalidade:"debito",bandeira:correcaoBandeiraDebito,parcelas:1,valor:correcaoCentavos(correcaoValores.debito)/100},
         {forma:"cartao",modalidade:"credito",bandeira:correcaoBandeiraCredito,parcelas:correcaoParcelas,valor:correcaoCentavos(correcaoValores.credito)/100}
       ].filter(p=>p.valor>0);
+      if(financeiraModo==="corrigir_pagamento"){await solicitarFinanceira("corrigir_pagamento",String(correcaoVenda.id),{motivo:correcaoMotivo.trim(),pagamentos:novosPagamentos});return;}
+    if(!pagamentoCredencial||pagamentoCredencial.vendaId!==String(correcaoVenda.id)){
+      setCorrecaoErro("Autorização expirada. Feche e solicite novamente.");return;
+    }
+    setCorrecaoSalvando(true);setCorrecaoErro("");
+    try{
       const {data,error}=await supabase.rpc("evolux_corrigir_pagamento_detalhado_autorizado",{
         p_venda_id:String(correcaoVenda.id),
         p_pagamentos:novosPagamentos,
@@ -872,6 +973,8 @@ export default function PDV() {
   const [carregando, setCarregando] = useState(true);
   const [selecionado, setSelecionado] = useState(0);
   const buscaRef = useRef<HTMLInputElement>(null);
+  const [multiplicador,setMultiplicador]=useState(1);
+  useEffect(()=>{setMultiplicador(1)},[telaVenda]);
   const [tipoBusca, setTipoBusca] = useState<"codigo"|"descricao">("codigo");
   const [itemSelecionado, setItemSelecionado] = useState<string|null>(null);
   const [modalPesquisa, setModalPesquisa] = useState(false);
@@ -930,7 +1033,7 @@ export default function PDV() {
    }
   function alternarBuscaProduto(){
     setProdutoPendente(null);
-    setTipoBusca(atual => atual==="codigo" ? "descricao" : "codigo");
+    setMultiplicador(1);setTipoBusca(atual => atual==="codigo" ? "descricao" : "codigo");
     setModalPesquisa(false);
     setBusca("");
     window.requestAnimationFrame(()=>buscaRef.current?.focus());
@@ -998,6 +1101,7 @@ export default function PDV() {
 
   useEffect(() => {
     const atalho = (e: KeyboardEvent) => {
+      if(financeiraPedido||financeiraOcupada){e.preventDefault();return;}
       if(pinAcao){if(["Escape","F9","Delete"].includes(e.key))e.preventDefault();return;}
       if(e.key==="F10" && !e.repeat){
         // F10 fecha o caixa apenas no painel inicial. Na busca rápida de vendas,
@@ -1104,7 +1208,7 @@ export default function PDV() {
     };
     window.addEventListener("keydown", atalho);
     return () => window.removeEventListener("keydown", atalho);
-  }, [telaVenda, abertura, empresaId, usuarioId, processandoCaixa, carrinho, itemSelecionado, produtoPendente, tipoBusca, modalCliente, modalPesquisa, cadastroRapido, modalOperacao, abaBuscaRapida, indiceRapido, produtosRapidos, clientesRapidos, pagamentos, descontoPagamento, vendaConfirmada, operacaoEnviada, finalizandoVenda, historicoAberto, historicoDetalhe, correcaoVenda, correcaoSalvando, cancelamentoAberto, cancelamentoSalvando, trocaPDVFinalizar, trocaPDVBuscaAberta, trocaPDVCatalogoAberto, turno, fechamentoAberto, fechamentoEnviando, consultaProdutosAberta, movCaixaTipo, trocaPDVAtiva, vendaConfirmada, modalOperacao, perfilFuncionario, configurandoCartao, pinAcao]);
+  }, [financeiraPedido, financeiraOcupada, telaVenda, abertura, empresaId, usuarioId, processandoCaixa, carrinho, itemSelecionado, produtoPendente, tipoBusca, modalCliente, modalPesquisa, cadastroRapido, modalOperacao, abaBuscaRapida, indiceRapido, produtosRapidos, clientesRapidos, pagamentos, descontoPagamento, vendaConfirmada, operacaoEnviada, finalizandoVenda, historicoAberto, historicoDetalhe, correcaoVenda, correcaoSalvando, cancelamentoAberto, cancelamentoSalvando, trocaPDVFinalizar, trocaPDVBuscaAberta, trocaPDVCatalogoAberto, turno, fechamentoAberto, fechamentoEnviando, consultaProdutosAberta, movCaixaTipo, trocaPDVAtiva, vendaConfirmada, modalOperacao, perfilFuncionario, configurandoCartao, pinAcao]);
 
   useEffect(() => {
     let ativo = true;
@@ -1376,15 +1480,17 @@ export default function PDV() {
     window.requestAnimationFrame(() => quantidadeRef.current?.focus());
   }
   function confirmarProduto() {
-    if(operacaoEnviada)return;
     if (!produtoPendente) return;
-    const quantidade = Number(quantidadePendente.replace(",", "."));
+    adicionarProdutoDireto(produtoPendente,Number(quantidadePendente.replace(",", ".")));
+  }
+  function adicionarProdutoDireto(produto:Produto, quantidade:number) {
+    if(operacaoEnviada)return;
     if (!Number.isSafeInteger(quantidade) || quantidade < 1 || quantidade > 99999) {
       setErro("Informe uma quantidade inteira entre 1 e 99999.");
       quantidadeRef.current?.focus();
       return;
     }
-    const produto = produtoPendente;
+    if((carrinho.find(l=>l.produto.id===produto.id)?.quantidade||0)+quantidade>99999){setErro("Quantidade máxima excedida.");return;}
     if(trocaPDVAtiva){
       const existente=carrinho.find(l=>l.produto.id===produto.id)?.quantidade||0;
       if(existente+quantidade>Number(produto.estoque_atual)){setErro("Estoque insuficiente para o produto novo.");return;}
@@ -1396,6 +1502,8 @@ export default function PDV() {
       if (existente) return atual.map(l => l.produto.id === produto.id ? {...l, quantidade:novaQuantidade} : l);
       return [...atual, {produto, quantidade}];
     });
+    setErro("");
+    setMultiplicador(1);
     setItemSelecionado(produto.id);
     setProdutoPendente(null);
     setQuantidadePendente("1");
@@ -1405,7 +1513,7 @@ export default function PDV() {
   }
   function limpar() {
     if (carrinho.length && !window.confirm("Limpar os itens do carrinho? Nenhuma venda foi registrada.")) return;
-    setCarrinho([]);
+    setCarrinho([]);setMultiplicador(1);
     buscaRef.current?.focus();
   }
   useEffect(() => { setSelecionado(0); }, [busca]);
@@ -1490,7 +1598,7 @@ export default function PDV() {
             <label className="ev-novo-busca">Buscar cliente <small>F3 • CPF/CNPJ, código ou telefone</small><div><input id="ev-cliente-inicial" value={clienteBusca} onChange={e=>setClienteBusca(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();void iniciarVenda()}}} placeholder="Informe o cliente ou deixe em branco"/><button type="button" onClick={()=>void iniciarVenda()} title="Iniciar venda">Continuar →</button></div></label>
           </div>
           <button type="button" className="ev-m2-action ev-m2-consulta" onClick={()=>void abrirConsultaProdutos()}><span className="ev-m2-action-icon" aria-hidden="true">⌕</span><span className="ev-m2-action-copy"><strong>CONSULTAR PRODUTOS</strong><small>Consultar preço de venda e estoque disponível</small></span><kbd>F4</kbd></button>
-          {turno?<button type="button" className="ev-m2-action ev-m2-fechar" disabled={fechamentoCarregando||fechamentoEnviando} onClick={()=>void abrirFechamento()} title="Fechar caixa (F10)"><span className="ev-m2-action-icon" aria-hidden="true">▣</span><span className="ev-m2-action-copy"><strong>FECHAMENTO DE CAIXA</strong><small>Contagem cega do turno {turno.numero} e envio à supervisão</small></span><kbd>F10</kbd></button>:<button type="button" className="ev-m2-action ev-m2-abrir" disabled={processandoCaixa||!!abertura||caixaEmConferencia||verificandoConferencia} onClick={()=>void iniciarVenda()}><span className="ev-m2-action-icon" aria-hidden="true">▣</span><span className="ev-m2-action-copy"><strong>ABRIR CAIXA</strong><small>Informe o saldo inicial para começar o turno</small></span><kbd>↵</kbd></button>}
+          {!turno&&<button type="button" className="ev-m2-action ev-m2-abrir" disabled={processandoCaixa||!!abertura||caixaEmConferencia||verificandoConferencia} onClick={()=>void iniciarVenda()}><span className="ev-m2-action-icon" aria-hidden="true">▣</span><span className="ev-m2-action-copy"><strong>ABRIR CAIXA</strong><small>Informe o saldo inicial para começar o turno</small></span><kbd>↵</kbd></button>}
           <button type="button" className="ev-novo-iniciar ev-m2-action" disabled={processandoCaixa||!!abertura||caixaEmConferencia||verificandoConferencia} onClick={()=>void iniciarVenda()}><span className="ev-novo-carrinho ev-m2-action-icon" aria-hidden="true">🛒</span><span className="ev-m2-action-copy"><strong>INICIAR NOVA VENDA</strong><small>Comece um atendimento no caixa</small></span><kbd>F2</kbd></button>
         </section>
         <section className="ev-novo-lateral"><div className="ev-novo-secao"><div className="ev-m2-side-heading"><span aria-hidden="true">▱</span><div><h2>Gestão do Caixa</h2><p>Operações e consultas do turno</p></div></div></div><div className="ev-novo-acoes">
@@ -1500,7 +1608,7 @@ export default function PDV() {
           <button type="button" onClick={()=>abrirMovCaixa("suprimento")} title="Adicionar dinheiro à gaveta"><span className="ev-novo-icone">+</span><span><strong>Suprimento</strong><small>Entrada de dinheiro no turno</small></span><em>Registrar →</em></button>
         </div></section>
       </div>
-      <p className="ev-novo-dica ev-m2-notice"><span aria-hidden="true">ⓘ</span> O fechamento exige contagem cega e aprovação do supervisor. Sair do PDV não encerra o turno.</p>
+      <section className="ev-m2-end-turn"><p className="ev-novo-dica ev-m2-notice"><span aria-hidden="true">ⓘ</span> O fechamento exige contagem cega e aprovação do supervisor. Sair do PDV não encerra o turno.</p>{turno&&<button type="button" className="ev-m2-action ev-m2-fechar" disabled={fechamentoCarregando||fechamentoEnviando} onClick={()=>void abrirFechamento()} title="Fechar caixa (F10)"><span className="ev-m2-action-icon" aria-hidden="true">▣</span><span className="ev-m2-action-copy"><strong>FECHAMENTO DE CAIXA</strong><small>Contagem cega do turno {turno.numero} e envio à supervisão</small></span><kbd>F10</kbd></button>}</section>
     </div>
     {movCaixaTipo&&<div className="ev-hist-fundo"><section className="ev-hist-modal" role="dialog" aria-modal="true" aria-label="Movimentação de caixa">
       <header className="ev-hist-topo"><div><small>EVOLUX • GESTÃO DO CAIXA</small><h2>{movCaixaTipo==="sangria"?"Sangria de Caixa":"Suprimento de Caixa"}</h2></div><button type="button" disabled={movCaixaSalvando} onClick={()=>setMovCaixaTipo(null)}>✕ Fechar</button></header>
@@ -1539,7 +1647,7 @@ export default function PDV() {
           <div style={{padding:22,display:"grid",gap:15}}><p style={{margin:0,color:"#334155"}}>Venda #{String(cancelamentoVenda.numero)} · {dinheiro(Number(cancelamentoVenda.total||0))}</p>
             {cancelamentoErro&&<p role="alert" style={{color:"#b42318",margin:0}}>{cancelamentoErro}</p>}
             <label style={{display:"grid",gap:7,color:"#102c58",fontWeight:600}}>Motivo obrigatório<textarea autoFocus rows={4} maxLength={1000} value={cancelamentoMotivo} onChange={e=>setCancelamentoMotivo(e.target.value)} placeholder="Informe o motivo (mínimo de 5 caracteres)" style={{width:"100%",boxSizing:"border-box",padding:12,border:"1px solid #cbd5e1",borderRadius:10,resize:"vertical"}}/></label>
-            <div style={{display:"flex",justifyContent:"flex-end",gap:10}}><button type="button" onClick={()=>{setCancelamentoVenda(null);setCancelamentoMotivo("");setCancelamentoErro("");setCancelamentoAutorizado(false);setAdminCancelamentoPin("");}} style={{padding:"11px 15px",borderRadius:10,border:"1px solid #cbd5e1",background:"white"}}>Voltar</button><button type="button" disabled={!cancelamentoAutorizado||cancelamentoMotivo.trim().length<5||!cancelamentoItens.length||cancelamentoSalvando} onClick={()=>void confirmarCancelamentoVenda()} style={{padding:"11px 15px",borderRadius:10,border:0,background:"#102c58",color:"white",fontWeight:700,opacity:cancelamentoMotivo.trim().length<5?0.5:1}}>Confirmar cancelamento</button></div>
+            <div style={{display:"flex",justifyContent:"flex-end",gap:10}}><button type="button" onClick={()=>{setCancelamentoVenda(null);setCancelamentoMotivo("");setCancelamentoErro("");setCancelamentoAutorizado(false);setAdminCancelamentoPin("");}} style={{padding:"11px 15px",borderRadius:10,border:"1px solid #cbd5e1",background:"white"}}>Voltar</button><button type="button" disabled={!cancelamentoAutorizado||cancelamentoMotivo.trim().length<5||!cancelamentoItens.length||cancelamentoSalvando} onClick={()=>financeiraModo==="cancelar_venda"&&cancelamentoVenda?void solicitarFinanceira("cancelar_venda",String(cancelamentoVenda.id),{motivo:cancelamentoMotivo.trim()}):void confirmarCancelamentoVenda()} style={{padding:"11px 15px",borderRadius:10,border:0,background:"#102c58",color:"white",fontWeight:700,opacity:cancelamentoMotivo.trim().length<5?0.5:1}}>{financeiraModo==="cancelar_venda"?"Solicitar autorização remota":"Confirmar cancelamento"}</button></div>
           </div></section></div>}
         {cancelamentoVenda&&autorizacaoCancelamentoAberta&&!cancelamentoAutorizado&&String(cancelamentoVenda.situacao)==="concluida"&&<div role="presentation" style={{position:"fixed",inset:0,zIndex:9999,display:"grid",placeItems:"center",background:"#071a35a8",padding:16}}><section role="dialog" aria-modal="true" aria-label="Autorização de cancelamento" style={{width:"min(480px,100%)",background:"white",borderRadius:16,overflow:"hidden",boxShadow:"0 24px 70px #071a3550"}}>
           <header style={{background:"#102c58",color:"white",padding:"18px 22px",display:"flex",justifyContent:"space-between",alignItems:"center"}}><h3 style={{margin:0,fontSize:19,color:"white"}}>Autorização de cancelamento</h3><button type="button" disabled={cancelamentoSalvando} onClick={()=>{setAutorizacaoCancelamentoAberta(false);setAdminCancelamentoPin("");setCancelamentoAutorizado(false);setCancelamentoVenda(null);setCancelamentoErro("");}} style={{background:"transparent",color:"white",border:"1px solid #ffffff70",borderRadius:8,padding:"6px 10px",cursor:"pointer"}}>✕</button></header>
@@ -1548,7 +1656,7 @@ export default function PDV() {
             <label style={{display:"grid",gap:7,fontWeight:600,color:"#102c58"}}>PIN do administrador<div style={{display:"flex",gap:8}}><input type={mostrarPinCancelamento?"text":"password"} autoComplete="off" value={adminCancelamentoPin} onChange={e=>setAdminCancelamentoPin(e.target.value)} disabled={cancelamentoSalvando} placeholder="PIN individual" style={{flex:1,minWidth:0,padding:12,border:"1px solid #cbd5e1",borderRadius:10}}/><button type="button" onClick={()=>setMostrarPinCancelamento(v=>!v)} style={{background:"#f1f5f9",border:"1px solid #cbd5e1",borderRadius:10,padding:"0 12px"}}>{mostrarPinCancelamento?"Ocultar":"👁 Mostrar"}</button></div></label>
             {cancelamentoErro&&<p role="alert" style={{color:"#b42318",margin:0}}>{cancelamentoErro}</p>}
             <p style={{fontSize:12,color:"#64748b",margin:0}}>A operação devolve os produtos ao estoque e registra o estorno como pendente.</p>
-            <div style={{display:"flex",justifyContent:"flex-end",gap:10}}><button type="button" disabled={cancelamentoSalvando} onClick={()=>{setAutorizacaoCancelamentoAberta(false);setAdminCancelamentoPin("");setCancelamentoAutorizado(false);setCancelamentoVenda(null);setCancelamentoErro("");}} style={{padding:"11px 15px",borderRadius:10,border:"1px solid #cbd5e1",background:"white"}}>Voltar</button><button type="button" disabled={cancelamentoSalvando||validandoAdminCancelamento||!adminCancelamentoId||adminCancelamentoPin.length<3} onClick={()=>void validarAdministradorCancelamento()} style={{padding:"11px 15px",borderRadius:10,border:0,background:"#b42318",color:"white",fontWeight:700}}>{validandoAdminCancelamento?"Validando...":"Validar PIN"}</button></div>
+            <div style={{display:"flex",justifyContent:"flex-end",gap:10}}><button type="button" disabled={cancelamentoSalvando} onClick={()=>{setAutorizacaoCancelamentoAberta(false);setAdminCancelamentoPin("");setCancelamentoAutorizado(false);setCancelamentoVenda(null);setCancelamentoErro("");}} style={{padding:"11px 15px",borderRadius:10,border:"1px solid #cbd5e1",background:"white"}}>Voltar</button><button type="button" disabled={!adminCancelamentoId||validandoAdminCancelamento} onClick={()=>{setFinanceiraAdmin(adminCancelamentoId);setFinanceiraModo("cancelar_venda");setFinanceiraErro("");setAdminCancelamentoPin("");setCancelamentoAutorizado(true);setAutorizacaoCancelamentoAberta(false);}}>Autorização remota</button><button type="button" disabled={cancelamentoSalvando||validandoAdminCancelamento||!adminCancelamentoId||adminCancelamentoPin.length<3} onClick={()=>void validarAdministradorCancelamento()} style={{padding:"11px 15px",borderRadius:10,border:0,background:"#b42318",color:"white",fontWeight:700}}>{validandoAdminCancelamento?"Validando...":"Validar PIN"}</button></div>
           </div></section></div>}
       </div>
     </section></div>}
@@ -1592,20 +1700,21 @@ export default function PDV() {
           </>}
           {correcaoErro&&<p role="alert" className="ev-hist-erro">{correcaoErro}</p>}
           {correcaoSucesso&&<p role="status" className="ev-correcao-sucesso">{correcaoSucesso}</p>}
-          <div className="ev-correcao-botoes"><button type="button" onClick={fecharCorrecao} disabled={correcaoSalvando}>{correcaoSucesso?"Concluir":"Cancelar"}</button>{!correcaoSucesso&&<button type="button" className="ev-correcao-confirmar" disabled={!correcaoValida||!!correcaoErro} onClick={()=>void salvarCorrecao()}>{correcaoSalvando?"Salvando...":"Confirmar correção"}</button>}</div>
+          <div className="ev-correcao-botoes"><button type="button" onClick={fecharCorrecao} disabled={correcaoSalvando}>{correcaoSucesso?"Concluir":"Cancelar"}</button>{!correcaoSucesso&&<button type="button" className="ev-correcao-confirmar" disabled={!correcaoValida||!!correcaoErro} onClick={()=>void salvarCorrecao()}>{correcaoSalvando?"Salvando...":financeiraModo==="corrigir_pagamento"?"Solicitar autorização remota":"Confirmar correção"}</button>}</div>
         </div>
       </section></div>}
     </section></div>}
+    {(financeiraPedido||financeiraOcupada||financeiraErro)&&<div role="dialog" aria-modal="true" style={{position:"fixed",inset:0,zIndex:100001,background:"#071a35aa",display:"grid",placeItems:"center"}}><section style={{width:"min(460px,95%)",background:"white",borderRadius:12,overflow:"hidden",color:"#102c58"}}><header style={{background:"#102c58",color:"white",padding:16,fontWeight:700}}>Autorização remota</header><div style={{padding:20}}><p>{financeiraPedido?"Aguardando decisão do administrador...":financeiraOcupada?"Enviando solicitação...":"Solicitação não concluída."}</p>{financeiraErro&&<p role="alert">{financeiraErro}</p>}{financeiraPedido?<button type="button" onClick={()=>void cancelarFinanceira()}>Cancelar solicitação</button>:!financeiraOcupada&&<button type="button" onClick={()=>setFinanceiraErro("")}>Voltar</button>}</div></section></div>}
     {pinAcao&&<div style={{position:"fixed",inset:0,zIndex:99999,background:"rgba(6,19,43,.7)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
       <section role="dialog" aria-modal="true" aria-label="Autorização do administrador" style={{background:"#fff",borderRadius:16,width:"min(440px,100%)",overflow:"hidden",boxShadow:"0 20px 60px #0005"}}>
         <header style={{background:"#102c58",color:"#fff",padding:"16px 20px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <strong>Autorização do administrador</strong>
-          <button type="button" aria-label="Fechar" disabled={pinProcessando} onClick={()=>{setPinAcao(null);setPinValor("");setPagamentoPendente(null);}} style={{background:"transparent",border:0,color:"#fff",fontSize:23,cursor:"pointer"}}>×</button>
+          <button type="button" aria-label="Fechar" disabled={pinProcessando||!!remota} onClick={()=>{setPinAcao(null);setPinValor("");setPagamentoPendente(null);}} style={{background:"transparent",border:0,color:"#fff",fontSize:23,cursor:"pointer"}}>×</button>
         </header>
         <div style={{padding:20,display:"grid",gap:14,color:"#14243d"}}>
           <p style={{margin:0}}>{pinAcao==="apagar"?"Autorizar exclusão do produto lançado.":pinAcao==="cancelar_lancamento"?"Autorizar cancelamento do lançamento atual.":"Autorizar alteração do pagamento da venda."}</p>
           <label style={{display:"grid",gap:6}}>Administrador
-            <select value={pinAdminId} onChange={e=>setPinAdminId(e.target.value)} disabled={pinProcessando} style={{padding:11,borderRadius:9,border:"1px solid #bdc9d9"}}>
+            <select value={pinAdminId} onChange={e=>setPinAdminId(e.target.value)} disabled={pinProcessando||!!remota} style={{padding:11,borderRadius:9,border:"1px solid #bdc9d9"}}>
               {pinAdmins.map(a=><option key={a.id} value={a.id}>{a.nome}</option>)}
             </select>
           </label>
@@ -1615,10 +1724,11 @@ export default function PDV() {
               <button type="button" onClick={()=>setPinMostrar(a=>!a)}>{pinMostrar?"Ocultar":"Mostrar"}</button>
             </div>
           </label>
+          {pinAcao==="pagamento"&&<button type="button" disabled={!pinAdminId||pinProcessando||!pagamentoPendente} onClick={()=>{if(!pagamentoPendente)return;setFinanceiraAdmin(pinAdminId);setFinanceiraModo("corrigir_pagamento");setFinanceiraErro("");setPagamentoCredencial(null);void abrirCorrecao(pagamentoPendente);setPagamentoPendente(null);setPinAcao(null);setPinValor("");}}>Autorização remota</button>}{pinAcao!=="pagamento"&&(remota?<div role="status">Aguardando autorização remota... <button type="button" disabled={pinProcessando} onClick={()=>void cancelarRemota()}>Cancelar solicitação</button></div>:<button type="button" disabled={pinProcessando||!pinAdminId} onClick={()=>void solicitarRemota()} style={{padding:11,borderRadius:9,border:"1px solid #102c58",color:"#102c58",background:"white",cursor:"pointer"}}>Solicitar autorização remota</button>)}
           {pinErro&&<p role="alert" style={{color:"#b42332",margin:0}}>{pinErro}</p>}
           <div style={{display:"flex",justifyContent:"flex-end",gap:10}}>
-            <button type="button" disabled={pinProcessando} onClick={()=>{setPinAcao(null);setPinValor("");setPagamentoPendente(null);}} style={{padding:"10px 15px",borderRadius:9}}>Cancelar</button>
-            <button type="button" disabled={pinProcessando||!pinAdminId||pinValor.length<3} onClick={()=>void confirmarAutorizacao()} style={{padding:"10px 15px",borderRadius:9,background:"#102c58",color:"#fff",border:0}}>{pinProcessando?"Validando...":"Autorizar"}</button>
+            <button type="button" disabled={pinProcessando||!!remota} onClick={()=>{setPinAcao(null);setPinValor("");setPagamentoPendente(null);}} style={{padding:"10px 15px",borderRadius:9}}>Cancelar</button>
+            <button type="button" disabled={pinProcessando||!!remota||!pinAdminId||pinValor.length<3} onClick={()=>void confirmarAutorizacao()} style={{padding:"10px 15px",borderRadius:9,background:"#102c58",color:"#fff",border:0}}>{pinProcessando?"Validando...":"Autorizar"}</button>
           </div>
         </div>
       </section>
@@ -1724,6 +1834,22 @@ export default function PDV() {
     .ev-caixa-livre input:not([type="radio"]){cursor:text}
     .ev-caixa-livre button:disabled,.ev-caixa-livre select:disabled{cursor:not-allowed}
     .ev-caixa-livre{min-height:100dvh;display:flex;flex-direction:column;background:#f4f7fc;color:#142744;font:14px Arial,Helvetica,sans-serif}.ev-caixa-livre *{box-sizing:border-box}.ev-novo-topo{background:#102b55;color:#fff;min-height:92px;padding:20px clamp(20px,4vw,72px);display:flex;justify-content:space-between;align-items:center;gap:20px}.ev-novo-marca{display:flex;align-items:center;gap:12px}.ev-novo-simbolo{width:45px;height:45px;border-radius:12px;background:#2479d8;display:grid;place-items:center;font-weight:900;font-size:28px}.ev-novo-marca strong{font-size:25px;letter-spacing:1px}.ev-novo-marca strong span{color:#5ac9ff}.ev-novo-marca small{display:block;font-size:10px;letter-spacing:1.6px;color:#b8d2f1;margin-top:3px}.ev-novo-turno{display:flex;align-items:center;gap:15px;font-size:12px;color:#c8d9ef}.ev-novo-turno strong{font:700 20px monospace;color:#fff}.ev-novo-status{display:flex;align-items:center;gap:7px;background:#ffffff19;padding:9px 12px;border-radius:30px;color:#fff}.ev-novo-status i{width:8px;height:8px;background:#48e0a0;border-radius:50%}.ev-novo-conteudo{width:min(1200px,calc(100% - 40px));margin:0 auto;padding:35px 0 50px;flex:1}.ev-novo-titulo{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:28px}.ev-novo-titulo small,.ev-novo-secao small{font-size:11px;color:#4771a6;font-weight:800;letter-spacing:1.3px}.ev-novo-titulo h1{font-size:35px;line-height:1.15;margin:7px 0;color:#132c50}.ev-novo-titulo p{color:#697c96;margin:0;text-transform:capitalize}.ev-novo-sair{display:flex;align-items:center;gap:9px;background:#fff;border:1px solid #d6e0ed;color:#233c5e;padding:12px 15px;border-radius:11px;font-weight:700;cursor:pointer;box-shadow:0 2px 8px #102b5508}.ev-novo-sair:hover{border-color:#93afce;background:#f9fbff}.ev-novo-sair>span{font-size:20px}.ev-novo-sair kbd,.ev-novo-iniciar kbd{font:700 12px Arial,sans-serif;border:1px solid #d8e1ed;border-radius:5px;padding:4px 7px;color:#6c8099}.ev-novo-grid{display:grid;grid-template-columns:minmax(0,1.12fr) minmax(0,1fr);gap:24px;align-items:start}.ev-novo-principal{display:flex;flex-direction:column;gap:18px}.ev-novo-card,.ev-novo-lateral{background:#fff;border:1px solid #dce5f1;border-radius:17px;padding:25px;box-shadow:0 6px 22px #17365b0b}.ev-novo-card-titulo{display:flex;align-items:center;gap:10px;font-size:17px;margin-bottom:22px}.ev-novo-card-titulo>span{background:#edf4ff;color:#1a5da9;padding:9px;border-radius:9px}.ev-novo-campos{display:grid;grid-template-columns:1fr 1fr;gap:14px}.ev-novo-campos label,.ev-novo-busca{display:block;font-weight:700;font-size:12px;color:#294363}.ev-novo-campos small,.ev-novo-busca small{font-weight:400;color:#7b8ca3;margin-left:5px}.ev-novo-campos select,.ev-novo-busca input{display:block;margin-top:9px;width:100%;height:43px;padding:0 12px;border:1px solid #d0ddeb;border-radius:9px;background:#fff;color:#1d3555;font:14px Arial,sans-serif}.ev-novo-busca{margin-top:21px}.ev-novo-busca>div{display:flex;gap:9px}.ev-novo-busca input{flex:1;min-width:0}.ev-novo-busca button{margin-top:9px;background:#edf4ff;color:#154d90;border:1px solid #cbdcf1;border-radius:9px;padding:0 14px;font-weight:700;cursor:pointer}.ev-novo-iniciar{width:100%;min-height:105px;background:#137246;color:#fff;border:0;border-radius:15px;display:flex;align-items:center;gap:18px;text-align:left;padding:22px 25px;cursor:pointer;box-shadow:0 10px 20px #13724620}.ev-novo-iniciar:hover{background:#0f613b}.ev-novo-iniciar:disabled{opacity:.6;cursor:wait}.ev-novo-carrinho{font-size:30px;background:#ffffff24;border-radius:12px;padding:12px}.ev-novo-iniciar strong{display:block;font-size:20px;letter-spacing:.3px}.ev-novo-iniciar small{display:block;font-size:12px;color:#d3f7e3;margin-top:5px}.ev-novo-iniciar kbd{margin-left:auto;border-color:#ffffff77;color:#fff}.ev-novo-dica{font-size:12px;line-height:1.5;color:#6b7e97;margin:0 3px}.ev-novo-secao h2{font-size:20px;margin:7px 0}.ev-novo-secao p{color:#71839c;font-size:12px;line-height:1.5;margin:0 0 18px}.ev-novo-acoes{display:grid;gap:10px}.ev-novo-acoes button{width:100%;display:flex;align-items:center;text-align:left;gap:13px;background:#f8fafd;border:1px solid #e1e8f1;border-radius:12px;padding:15px 13px;color:#334963}.ev-novo-acoes button:disabled{cursor:not-allowed}.ev-novo-icone{display:grid;place-items:center;flex:none;width:40px;height:40px;background:#eaf1fa;border-radius:10px;font-size:24px;color:#47719d}.ev-novo-acoes button>span:nth-child(2){flex:1}.ev-novo-acoes strong{display:block;font-size:13px}.ev-novo-acoes small{display:block;font-size:11px;margin-top:4px;color:#75879c}.ev-novo-acoes em{font-size:10px;font-style:normal;background:#eaf0f7;color:#7b8ca3;border-radius:20px;padding:6px 8px;white-space:nowrap}.ev-novo-rodape{display:flex;justify-content:space-between;padding:14px clamp(20px,4vw,72px);border-top:1px solid #e1e8f1;background:#fff;font-size:11px;color:#8190a3}@media(max-width:900px){.ev-novo-grid{grid-template-columns:1fr}.ev-novo-topo{flex-wrap:wrap}.ev-novo-turno{flex-wrap:wrap}.ev-novo-conteudo{padding-top:25px}}@media(max-width:550px){.ev-novo-titulo{align-items:flex-start}.ev-novo-titulo h1{font-size:28px}.ev-novo-sair{font-size:0}.ev-novo-sair kbd{font-size:11px}.ev-novo-campos{grid-template-columns:1fr}.ev-novo-card,.ev-novo-lateral{padding:18px}.ev-novo-busca>div{flex-direction:column}.ev-novo-busca button{height:40px}.ev-novo-iniciar strong{font-size:15px}.ev-novo-iniciar{padding:15px;gap:10px}.ev-novo-turno>span:nth-child(2){display:none}}
+
+    /* Caixa Livre compacto: não interfere na tela de venda nem nos modais. */
+    .ev-caixa-livre>.ev-novo-topo{min-height:64px;padding:10px clamp(16px,3vw,48px)}
+    .ev-caixa-livre>.ev-m2-conteudo{width:min(1440px,calc(100% - 40px));padding:16px 0 12px;display:flex;flex-direction:column;gap:12px}
+    .ev-m2-conteudo .ev-m2-hero{padding:12px 18px;gap:16px;border-radius:14px}
+    .ev-m2-conteudo .ev-m2-hero-title h1{font-size:26px;margin:3px 0}.ev-m2-conteudo .ev-m2-hero-icon{width:42px;height:44px;font-size:27px}
+    .ev-m2-conteudo .ev-m2-metric{min-height:52px;padding:8px 10px;gap:8px;border-radius:10px}.ev-m2-conteudo .ev-m2-metric>span{font-size:21px}
+    .ev-m2-conteudo .ev-m2-grid{gap:14px;align-items:stretch}.ev-m2-conteudo .ev-novo-principal{gap:9px}
+    .ev-m2-conteudo .ev-novo-card,.ev-m2-conteudo .ev-novo-lateral{padding:16px;border-radius:14px}
+    .ev-m2-conteudo .ev-novo-card-titulo,.ev-m2-conteudo .ev-m2-side-heading{margin-bottom:12px;gap:10px}.ev-m2-conteudo .ev-novo-card-titulo>span{padding:8px 11px;font-size:20px}.ev-m2-conteudo .ev-novo-card-titulo strong,.ev-m2-conteudo .ev-m2-side-heading h2{font-size:18px}
+    .ev-m2-conteudo .ev-novo-campos select,.ev-m2-conteudo .ev-novo-busca input,.ev-m2-conteudo .ev-novo-busca button{height:38px;margin-top:5px;font-size:13px}.ev-m2-conteudo .ev-novo-busca{margin-top:12px}
+    .ev-m2-conteudo .ev-m2-action{min-height:54px;padding:8px 14px;gap:12px;border-radius:11px}.ev-m2-conteudo .ev-m2-action-icon{min-width:36px;height:36px;font-size:21px}.ev-m2-conteudo .ev-m2-action-copy strong{font-size:15px}.ev-m2-conteudo .ev-m2-action-copy small{margin-top:3px;font-size:11px}.ev-m2-conteudo .ev-m2-action kbd{font-size:12px;padding:5px 8px}
+    .ev-m2-conteudo .ev-m2-side-heading>span{width:40px;height:40px;font-size:23px}.ev-m2-conteudo .ev-m2-side-heading p{margin:3px 0 0;font-size:12px}.ev-m2-conteudo .ev-novo-acoes{gap:8px}.ev-m2-conteudo .ev-novo-acoes button{min-height:52px;padding:8px 10px;gap:10px;border-radius:10px}.ev-m2-conteudo .ev-novo-icone{width:34px;height:34px;font-size:21px}.ev-m2-conteudo .ev-novo-acoes strong{font-size:14px}.ev-m2-conteudo .ev-novo-acoes small{font-size:11px;margin-top:2px}.ev-m2-conteudo .ev-novo-acoes em{padding:5px 8px;font-size:11px}
+    .ev-m2-end-turn{display:flex;align-items:center;gap:14px;padding:10px 0 0;border-top:1px solid #d5dfed}.ev-m2-end-turn .ev-m2-notice{flex:1;margin:0;padding:8px 12px;font-size:12px;min-width:0}.ev-m2-end-turn .ev-m2-fechar{width:min(100%,390px);flex:none}.ev-m2-end-turn .ev-m2-notice span{font-size:18px}
+    @media(max-width:900px){.ev-m2-conteudo .ev-m2-grid{grid-template-columns:1fr}.ev-m2-end-turn{flex-wrap:wrap}.ev-m2-end-turn .ev-m2-fechar{width:100%}.ev-m2-end-turn .ev-m2-notice{flex-basis:100%}}
+    @media(min-width:901px) and (max-height:740px){.ev-caixa-livre>.ev-m2-conteudo{padding:9px 0;gap:8px}.ev-m2-conteudo .ev-m2-hero{padding:8px 14px}.ev-m2-conteudo .ev-novo-card,.ev-m2-conteudo .ev-novo-lateral{padding:12px}.ev-m2-conteudo .ev-m2-action{min-height:48px}.ev-m2-conteudo .ev-novo-acoes button{min-height:48px}.ev-m2-conteudo .ev-m2-end-turn{padding-top:6px}}
     `}</style>
     {fechamentoAberto&&<div className="ev-venda-overlay" style={{position:"fixed",inset:0,zIndex:3700,background:"rgba(7,22,47,.65)",display:"flex",alignItems:"center",justifyContent:"center",padding:16,boxSizing:"border-box",overflowY:"auto"}}>
       <section role="dialog" aria-modal="true" aria-label="Fechamento de caixa" style={{width:"min(560px,96vw)",maxHeight:"90dvh",overflowY:"auto",background:"#fff",borderRadius:16,boxShadow:"0 20px 60px #0005"}}>
@@ -1828,7 +1954,7 @@ export default function PDV() {
           {operacaoTroca==="cancelamento"&&String(cancelamentoVenda.situacao)==="concluida"&&!cancelamentoSucesso?<>
             <label className="ev-canc-motivo" htmlFor="ev-canc-motivo">Motivo do cancelamento (obrigatório)<textarea id="ev-canc-motivo" rows={3} maxLength={1000} value={cancelamentoMotivo} onChange={e=>setCancelamentoMotivo(e.target.value)} placeholder="Descreva o motivo com pelo menos 5 caracteres" disabled={cancelamentoSalvando}/></label>
             <p className="ev-hist-aviso">O cancelamento é definitivo. Os produtos retornam automaticamente ao estoque; o estorno financeiro será registrado como pendente, sem devolver dinheiro automaticamente.</p>
-            <div className="ev-canc-rodape"><button type="button" className="ev-canc-confirmar" disabled={cancelamentoSalvando||cancelamentoMotivo.trim().length<5||!cancelamentoItens.length||!cancelamentoAutorizado} onClick={()=>void confirmarCancelamentoVenda()}>{cancelamentoSalvando?"Cancelando...":"Confirmar cancelamento"}</button></div>
+            <div className="ev-canc-rodape"><button type="button" className="ev-canc-confirmar" disabled={cancelamentoSalvando||cancelamentoMotivo.trim().length<5||!cancelamentoItens.length||!cancelamentoAutorizado} onClick={()=>financeiraModo==="cancelar_venda"&&cancelamentoVenda?void solicitarFinanceira("cancelar_venda",String(cancelamentoVenda.id),{motivo:cancelamentoMotivo.trim()}):void confirmarCancelamentoVenda()}>{cancelamentoSalvando?"Cancelando...":financeiraModo==="cancelar_venda"?"Solicitar autorização remota":"Confirmar cancelamento"}</button></div>
           </>:operacaoTroca==="cancelamento"?<p className="ev-hist-aviso">Esta venda não pode ser cancelada novamente.</p>:null}
           {autorizacaoCancelamentoAberta&&operacaoTroca==="cancelamento"&&String(cancelamentoVenda.situacao)==="concluida"&&<div role="presentation" style={{position:"fixed",inset:0,zIndex:9999,display:"grid",placeItems:"center",background:"#071a35a8",padding:16}}><section role="dialog" aria-modal="true" aria-label="Autorização de cancelamento" style={{width:"min(480px,100%)",background:"#fff",borderRadius:16,overflow:"hidden",boxShadow:"0 24px 70px #071a3550"}}>
             <header style={{background:"#102c58",color:"white",padding:"18px 22px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12}}><h3 style={{margin:0,fontSize:19,color:"white"}}>Autorização de cancelamento</h3><button type="button" disabled={cancelamentoSalvando} onClick={()=>{setAutorizacaoCancelamentoAberta(false);setCancelamentoVenda(null);setCancelamentoAutorizado(false);setAdminCancelamentoPin("");}} aria-label="Fechar autorização" style={{background:"transparent",color:"white",border:"1px solid #ffffff70",borderRadius:8,padding:"6px 10px",cursor:"pointer"}}>✕</button></header>
@@ -1836,7 +1962,7 @@ export default function PDV() {
               <label style={{display:"grid",gap:7,fontWeight:600,color:"#102c58"}}>Administrador<select value={adminCancelamentoId} onChange={e=>setAdminCancelamentoId(e.target.value)} disabled={cancelamentoSalvando} style={{width:"100%",padding:12,border:"1px solid #cbd5e1",borderRadius:10,background:"white"}}><option value="">Selecione um administrador</option>{adminsCancelamento.map(a=><option key={a.id} value={a.id}>{a.nome}</option>)}</select></label>
               <label style={{display:"grid",gap:7,fontWeight:600,color:"#102c58"}}>PIN do administrador<div style={{display:"flex",gap:8}}><input type={mostrarPinCancelamento?"text":"password"} autoComplete="off" value={adminCancelamentoPin} onChange={e=>setAdminCancelamentoPin(e.target.value)} disabled={cancelamentoSalvando} placeholder="PIN individual" style={{flex:1,minWidth:0,padding:12,border:"1px solid #cbd5e1",borderRadius:10}}/><button type="button" onClick={()=>setMostrarPinCancelamento(v=>!v)} aria-label={mostrarPinCancelamento?"Ocultar PIN":"Mostrar PIN"} style={{background:"#f1f5f9",border:"1px solid #cbd5e1",borderRadius:10,padding:"0 12px",cursor:"pointer"}}>{mostrarPinCancelamento?"Ocultar":"👁 Mostrar"}</button></div></label>
               {cancelamentoErro&&<p role="alert" style={{color:"#b42318",margin:0}}>{cancelamentoErro}</p>}
-              <div style={{display:"flex",justifyContent:"flex-end",gap:10,flexWrap:"wrap"}}><button type="button" disabled={cancelamentoSalvando} onClick={()=>{setAutorizacaoCancelamentoAberta(false);setCancelamentoVenda(null);setCancelamentoAutorizado(false);setAdminCancelamentoPin("");setCancelamentoErro("");}} style={{padding:"11px 15px",borderRadius:10,border:"1px solid #cbd5e1",background:"white",cursor:"pointer"}}>Voltar</button><button type="button" disabled={cancelamentoSalvando||validandoAdminCancelamento||!adminCancelamentoId||adminCancelamentoPin.length<3} onClick={()=>void validarAdministradorCancelamento()} style={{padding:"11px 15px",borderRadius:10,border:0,background:"#b42318",color:"white",fontWeight:700,cursor:"pointer"}}>{validandoAdminCancelamento?"Validando...":"Validar administrador"}</button></div>
+              <div style={{display:"flex",justifyContent:"flex-end",gap:10,flexWrap:"wrap"}}><button type="button" disabled={cancelamentoSalvando} onClick={()=>{setAutorizacaoCancelamentoAberta(false);setCancelamentoVenda(null);setCancelamentoAutorizado(false);setAdminCancelamentoPin("");setCancelamentoErro("");}} style={{padding:"11px 15px",borderRadius:10,border:"1px solid #cbd5e1",background:"white",cursor:"pointer"}}>Voltar</button><button type="button" disabled={!adminCancelamentoId||validandoAdminCancelamento} onClick={()=>{setFinanceiraAdmin(adminCancelamentoId);setFinanceiraModo("cancelar_venda");setFinanceiraErro("");setAdminCancelamentoPin("");setCancelamentoAutorizado(true);setAutorizacaoCancelamentoAberta(false);}}>Autorização remota</button><button type="button" disabled={cancelamentoSalvando||validandoAdminCancelamento||!adminCancelamentoId||adminCancelamentoPin.length<3} onClick={()=>void validarAdministradorCancelamento()} style={{padding:"11px 15px",borderRadius:10,border:0,background:"#b42318",color:"white",fontWeight:700,cursor:"pointer"}}>{validandoAdminCancelamento?"Validando...":"Validar administrador"}</button></div>
             </div></section></div>}
         </div>}
       </div>
@@ -1844,26 +1970,28 @@ export default function PDV() {
 
     <div className="ev-venda-top">
       <section className="ev-venda-busca">
-        <div className="ev-venda-busca-tabs"><button className={tipoBusca==="codigo"?"ativo":""} onClick={()=>{setTipoBusca("codigo");setModalPesquisa(false);setBusca("");buscaRef.current?.focus()}}>▦ BUSCA POR CÓDIGO (F2)</button><button className={tipoBusca==="descricao"?"ativo":""} onClick={()=>{setTipoBusca("descricao");setModalPesquisa(false);setBusca("");buscaRef.current?.focus()}}>⌕ BUSCA POR DESCRIÇÃO (F2)</button></div>
+        <div className="ev-venda-busca-tabs"><button className={tipoBusca==="codigo"?"ativo":""} onClick={()=>{setTipoBusca("codigo");setModalPesquisa(false);setBusca("");buscaRef.current?.focus()}}>▦ BUSCA POR CÓDIGO (F2)</button><button className={tipoBusca==="descricao"?"ativo":""} onClick={()=>{setMultiplicador(1);setTipoBusca("descricao");setModalPesquisa(false);setBusca("");buscaRef.current?.focus()}}>⌕ BUSCA POR DESCRIÇÃO (F2)</button></div>
         {produtoPendente ? <>
           <strong>DIGITE A QUANTIDADE E PRESSIONE ENTER</strong>
           <div className="ev-pdv-pendente-nome" title={produtoPendente.descricao}>{produtoPendente.descricao}</div>
           <div className="ev-pdv-quantidade"><label htmlFor="ev-pdv-qtd">QUANTIDADE</label><div><input id="ev-pdv-qtd" ref={quantidadeRef} autoFocus inputMode="numeric" value={quantidadePendente} onFocus={e=>e.currentTarget.select()} onChange={e=>setQuantidadePendente(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();confirmarProduto();}}}/><button type="button" onClick={confirmarProduto} disabled={operacaoEnviada||!produtoPendente} style={{cursor:operacaoEnviada?"not-allowed":"pointer"}}>Adicionar à listagem ↵</button></div></div>
         </> : <>
           <strong>{tipoBusca==="codigo" ? "INFORME O CÓDIGO DO ITEM E PRESSIONE ENTER" : "DIGITE O NOME DO PRODUTO E PRESSIONE ENTER"}</strong>
-          <div className="ev-venda-input"><input ref={buscaRef} autoFocus value={busca} onChange={e=>{setBusca(e.target.value);setSelecionado(0)}} placeholder={tipoBusca==="codigo"?"Código / EAN":"Descrição do produto"} onKeyDown={e=>{
+          <div className="ev-venda-input"><input ref={buscaRef} autoFocus value={busca} onChange={e=>{const valor=e.target.value; if(tipoBusca==="codigo"&&/^\d+\*$/.test(valor)){const n=Number(valor.slice(0,-1));setBusca("");if(Number.isSafeInteger(n)&&n>=1&&n<=99999){setMultiplicador(n);setErro("");}else{setMultiplicador(1);setErro("Informe uma quantidade entre 1 e 99999.");}return;}setBusca(valor);setSelecionado(0)}} placeholder={tipoBusca==="codigo"?"Código / EAN":"Descrição do produto"} onKeyDown={e=>{
             if(e.key==="Enter"){
               e.preventDefault();
-              const termo=busca.trim().toLocaleLowerCase("pt-BR");
+              const termo=e.currentTarget.value.trim().toLocaleLowerCase("pt-BR");
+              if(!termo)return;
               const produto=tipoBusca==="codigo"
                 ? produtos.find(x=>String(x.codigo)===termo||(x.codigo_barras||"")===termo)
                 : encontrados[Math.min(selecionado,encontrados.length-1)];
-              if(produto)prepararProduto(produto);
-              else setErro("Produto não encontrado.");
+              if(produto){if(tipoBusca==="codigo")adicionarProdutoDireto(produto,multiplicador);else prepararProduto(produto);}
+              else {setErro("Produto não encontrado.");setBusca("");}
             }
             if(tipoBusca==="descricao"&&e.key==="ArrowDown"){e.preventDefault();setSelecionado(n=>Math.min(n+1,Math.max(0,encontrados.length-1)));}
             if(tipoBusca==="descricao"&&e.key==="ArrowUp"){e.preventDefault();setSelecionado(n=>Math.max(0,n-1));}
           }}/><button type="button" onClick={()=>{setModalPesquisa(false);void abrirPesquisaCliente();}} title="Abrir lista de produtos">🔎<small>F2</small></button></div>
+          {tipoBusca==="codigo"&&multiplicador!==1&&<small role="status">Próximo item: {multiplicador} unidades</small>}
           {tipoBusca==="descricao" && busca.trim() && <div className="ev-pdv-sugestoes" role="listbox" aria-label="Produtos encontrados">
             {encontrados.length ? encontrados.slice(0,6).map((p,i)=><button type="button" key={p.id} className={i===selecionado?"ativo":""} onClick={()=>prepararProduto(p)}>
               <span>{p.descricao}</span><strong>{dinheiro(Number(p.preco_venda))}</strong>
@@ -1879,16 +2007,17 @@ export default function PDV() {
       <div className="ev-venda-linha-baixo"><span className="ev-venda-numero">↩</span><span className="ev-venda-calculo">− {dinheiro(Number(trocaPDVItem.preco_unitario))} <small>UN</small> <b>×</b> <span className="ev-venda-qtd-fixa">{trocaPDVQtd}</span> <b>=</b> <strong>− {dinheiro(trocaPDVValorDevolvido)}</strong></span></div>
     </div>}{carrinho.map((l,i)=><div key={l.produto.id} className={`ev-venda-linha ${itemSelecionado===l.produto.id?"selecionado":""}`} onClick={()=>setItemSelecionado(l.produto.id)}><div className="ev-venda-linha-topo"><strong>{l.produto.descricao}</strong><span>{l.produto.codigo_barras||l.produto.codigo}</span></div><div className="ev-venda-linha-baixo"><span className="ev-venda-numero">{i+1}</span><span className="ev-venda-calculo">{dinheiro(Number(l.produto.preco_venda))} <small>UN</small> <b>×</b> <span className="ev-venda-qtd-fixa" aria-label={`Quantidade de ${l.produto.descricao}: ${l.quantidade}`}>{l.quantidade}</span> <b>=</b> <strong>{dinheiro(l.quantidade*Number(l.produto.preco_venda))}</strong></span></div></div>)}</div></section></div>
     <div className="ev-venda-totais"><div><strong>ITENS & LANÇAMENTOS</strong><span>{carrinho.length} itens • {unidades} unidades</span></div><div><strong>{trocaPDVAtiva?(trocaPDVDiferenca>0?"CLIENTE PAGA":trocaPDVDiferenca<0?"CLIENTE RECEBE":"TROCA SEM DIFERENÇA"):"TOTAL DO LANÇAMENTO"}</strong><b>{dinheiro(trocaPDVAtiva?Math.abs(trocaPDVDiferenca):total)}</b></div></div>
+    {(financeiraPedido||financeiraOcupada||financeiraErro)&&<div role="dialog" aria-modal="true" style={{position:"fixed",inset:0,zIndex:100001,background:"#071a35aa",display:"grid",placeItems:"center"}}><section style={{width:"min(460px,95%)",background:"white",borderRadius:12,overflow:"hidden",color:"#102c58"}}><header style={{background:"#102c58",color:"white",padding:16,fontWeight:700}}>Autorização remota</header><div style={{padding:20}}><p>{financeiraPedido?"Aguardando decisão do administrador...":financeiraOcupada?"Enviando solicitação...":"Solicitação não concluída."}</p>{financeiraErro&&<p role="alert">{financeiraErro}</p>}{financeiraPedido?<button type="button" onClick={()=>void cancelarFinanceira()}>Cancelar solicitação</button>:!financeiraOcupada&&<button type="button" onClick={()=>setFinanceiraErro("")}>Voltar</button>}</div></section></div>}
     {pinAcao&&<div style={{position:"fixed",inset:0,zIndex:99999,background:"rgba(6,19,43,.7)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
       <section role="dialog" aria-modal="true" aria-label="Autorização do administrador" style={{background:"#fff",borderRadius:16,width:"min(440px,100%)",overflow:"hidden",boxShadow:"0 20px 60px #0005"}}>
         <header style={{background:"#102c58",color:"#fff",padding:"16px 20px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <strong>Autorização do administrador</strong>
-          <button type="button" aria-label="Fechar" disabled={pinProcessando} onClick={()=>{setPinAcao(null);setPinValor("");setPagamentoPendente(null);}} style={{background:"transparent",border:0,color:"#fff",fontSize:23,cursor:"pointer"}}>×</button>
+          <button type="button" aria-label="Fechar" disabled={pinProcessando||!!remota} onClick={()=>{setPinAcao(null);setPinValor("");setPagamentoPendente(null);}} style={{background:"transparent",border:0,color:"#fff",fontSize:23,cursor:"pointer"}}>×</button>
         </header>
         <div style={{padding:20,display:"grid",gap:14,color:"#14243d"}}>
           <p style={{margin:0}}>{pinAcao==="apagar"?"Autorizar exclusão do produto lançado.":pinAcao==="cancelar_lancamento"?"Autorizar cancelamento do lançamento atual.":"Autorizar alteração do pagamento da venda."}</p>
           <label style={{display:"grid",gap:6}}>Administrador
-            <select value={pinAdminId} onChange={e=>setPinAdminId(e.target.value)} disabled={pinProcessando} style={{padding:11,borderRadius:9,border:"1px solid #bdc9d9"}}>
+            <select value={pinAdminId} onChange={e=>setPinAdminId(e.target.value)} disabled={pinProcessando||!!remota} style={{padding:11,borderRadius:9,border:"1px solid #bdc9d9"}}>
               {pinAdmins.map(a=><option key={a.id} value={a.id}>{a.nome}</option>)}
             </select>
           </label>
@@ -1898,10 +2027,11 @@ export default function PDV() {
               <button type="button" onClick={()=>setPinMostrar(a=>!a)}>{pinMostrar?"Ocultar":"Mostrar"}</button>
             </div>
           </label>
+          {pinAcao==="pagamento"&&<button type="button" disabled={!pinAdminId||pinProcessando||!pagamentoPendente} onClick={()=>{if(!pagamentoPendente)return;setFinanceiraAdmin(pinAdminId);setFinanceiraModo("corrigir_pagamento");setFinanceiraErro("");setPagamentoCredencial(null);void abrirCorrecao(pagamentoPendente);setPagamentoPendente(null);setPinAcao(null);setPinValor("");}}>Autorização remota</button>}{pinAcao!=="pagamento"&&(remota?<div role="status">Aguardando autorização remota... <button type="button" disabled={pinProcessando} onClick={()=>void cancelarRemota()}>Cancelar solicitação</button></div>:<button type="button" disabled={pinProcessando||!pinAdminId} onClick={()=>void solicitarRemota()} style={{padding:11,borderRadius:9,border:"1px solid #102c58",color:"#102c58",background:"white",cursor:"pointer"}}>Solicitar autorização remota</button>)}
           {pinErro&&<p role="alert" style={{color:"#b42332",margin:0}}>{pinErro}</p>}
           <div style={{display:"flex",justifyContent:"flex-end",gap:10}}>
-            <button type="button" disabled={pinProcessando} onClick={()=>{setPinAcao(null);setPinValor("");setPagamentoPendente(null);}} style={{padding:"10px 15px",borderRadius:9}}>Cancelar</button>
-            <button type="button" disabled={pinProcessando||!pinAdminId||pinValor.length<3} onClick={()=>void confirmarAutorizacao()} style={{padding:"10px 15px",borderRadius:9,background:"#102c58",color:"#fff",border:0}}>{pinProcessando?"Validando...":"Autorizar"}</button>
+            <button type="button" disabled={pinProcessando||!!remota} onClick={()=>{setPinAcao(null);setPinValor("");setPagamentoPendente(null);}} style={{padding:"10px 15px",borderRadius:9}}>Cancelar</button>
+            <button type="button" disabled={pinProcessando||!!remota||!pinAdminId||pinValor.length<3} onClick={()=>void confirmarAutorizacao()} style={{padding:"10px 15px",borderRadius:9,background:"#102c58",color:"#fff",border:0}}>{pinProcessando?"Validando...":"Autorizar"}</button>
           </div>
         </div>
       </section>
@@ -1943,7 +2073,7 @@ export default function PDV() {
       <p className="ev-pag-nota">MODO DE TESTE — nenhuma movimentação de estoque ou caixa será registrada. A confirmação permanece desabilitada até a integração financeira.</p>
       <footer><button type="button" onClick={()=>setTrocaPDVFinalizar(false)}>Voltar à troca (Esc)</button><button type="button" disabled title="Aguardando integração segura com estoque e fechamento de caixa">Confirmar troca (F12)</button></footer>
     </section></div>}
-    {modalOperacao&&<div className="ev-venda-overlay"><section className="ev-operacao-dialog ev-pagamento-novo" role="dialog" aria-modal="true" aria-label={modalOperacao==="pagamento"?"Confirmando pagamento":"Troca ou devolução"}>
+    {modalOperacao&&<div className="ev-venda-overlay"><section className={`ev-operacao-dialog ev-pagamento-novo${modalOperacao==="pagamento"&&!vendaConfirmada?" ev-pag-compacto":""}`} role="dialog" aria-modal="true" aria-label={modalOperacao==="pagamento"?"Confirmando pagamento":"Troca ou devolução"}>
       <header><h2>{modalOperacao==="pagamento"?"CONFIRMANDO PAGAMENTO":"Troca ou devolução"}</h2><button type="button" onClick={()=>{if(vendaConfirmada)novaVendaAposConfirmacao();else fecharPagamento();}} disabled={finalizandoVenda} aria-label="Fechar">×</button></header>
       {modalOperacao==="pagamento" ? vendaConfirmada ? <>
         <div className="ev-pag-resumo"><span>VENDA CONFIRMADA</span><strong>#{vendaConfirmada.numero}</strong></div>
@@ -1954,11 +2084,11 @@ export default function PDV() {
       </> : <>
         <div className="ev-pag-resumo"><span>TOTAL DA VENDA</span><strong>{dinheiro(total)}</strong></div>
         <div className="ev-pag-desconto" style={{display:"grid",gap:10}}>
-          <strong>1. DESCONTO DA VENDA <small>(F6)</small></strong>
+          <div className="ev-pag-desconto-top"><strong>1. DESCONTO DA VENDA <small>(F6)</small></strong>
           <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
             <button type="button" disabled={operacaoEnviada} aria-pressed={descontoTipo==="valor"} onClick={()=>{setDescontoTipo("valor");setDescontoPagamento("");setErroPagamento("");}} style={{padding:"8px 14px",borderRadius:8,border:"1px solid #9eb7db",background:descontoTipo==="valor"?"#dbeafe":"white",color:"#102957",fontWeight:700}}>Valor (R$)</button>
             <button type="button" disabled={operacaoEnviada} aria-pressed={descontoTipo==="percentual"} onClick={()=>{setDescontoTipo("percentual");setDescontoPagamento("");setErroPagamento("");}} style={{padding:"8px 14px",borderRadius:8,border:"1px solid #9eb7db",background:descontoTipo==="percentual"?"#dbeafe":"white",color:"#102957",fontWeight:700}}>Percentual (%)</button>
-          </div>
+          </div></div>
           <label className="ev-pag-linha"><span>{descontoTipo==="valor"?"DESCONTO EM REAIS":"DESCONTO EM PORCENTAGEM"}</span><div className="ev-pag-entrada"><span>{descontoTipo==="valor"?"R$":"%"}</span><input ref={el=>{pagamentoRefs.current.desconto=el;}} disabled={operacaoEnviada} inputMode="decimal" aria-label="Desconto" placeholder="0,00" value={descontoPagamento} onChange={e=>{if(!operacaoEnviada&&/^[\d.,]*$/.test(e.target.value)){setErroPagamento("");setDescontoPagamento(e.target.value);}}}/></div></label>
           <small>Desconto comercial: {dinheiroCentavos(descontoCentavos)}. O valor cobrado será atualizado antes dos pagamentos.</small>
           {(descontoCentavos>totalCentavos||(descontoTipo==="percentual"&&Number(descontoPagamento.replace(",","."))>100))&&<p role="alert" className="ev-pag-erro">O desconto não pode ultrapassar o total da venda.</p>}
@@ -2344,6 +2474,27 @@ export default function PDV() {
       .ev-cartao-conteudo footer{display:flex;justify-content:flex-end;gap:9px;flex-wrap:wrap}
       .ev-cartao-conteudo footer button{border-radius:9px;border:1px solid #b7c9e5;padding:11px 14px;font-weight:800;cursor:pointer;background:#f4f7fc;color:#102957}
       .ev-cartao-conteudo footer button:last-child{background:#112e59;color:#fff;border-color:#112e59}
+
+      /* Pagamento compacto — somente durante a confirmação da venda. */
+      .ev-pagamento-novo.ev-pag-compacto{width:min(980px,96vw)!important;max-width:none!important;max-height:calc(100dvh - 20px)!important;gap:6px!important;overflow-y:auto!important}
+      .ev-pag-compacto>header{padding:9px 18px!important;position:static!important}
+      .ev-pag-compacto>.ev-pag-resumo{padding:7px 12px;min-height:40px}
+      .ev-pag-compacto .ev-pag-resumo strong{font-size:23px}
+      .ev-pag-compacto .ev-pag-desconto{padding:8px 10px;gap:5px!important}
+      .ev-pag-desconto-top{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+      .ev-pag-compacto .ev-pag-desconto-top button{padding:5px 10px!important;cursor:pointer}
+      .ev-pag-compacto .ev-pag-desconto-top button:disabled{cursor:not-allowed}
+      .ev-pag-compacto .ev-pag-desconto>small{margin:0;font-size:11px}
+      .ev-pag-compacto .ev-pag-instrucao{margin-top:0!important;margin-bottom:0!important}
+      .ev-pag-compacto .ev-pag-campos{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;align-items:start}
+      .ev-pag-compacto .ev-pag-linha{padding:5px 8px;gap:6px}
+      .ev-pag-compacto .ev-pag-entrada{width:140px;max-width:48%}
+      .ev-pag-compacto .ev-pag-entrada input{padding:5px 8px;font-size:17px}
+      .ev-pag-compacto .ev-pag-totais{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px!important}
+      .ev-pag-compacto .ev-pag-totais>div{min-height:32px;padding:5px 9px!important}
+      .ev-pag-compacto>footer{margin:2px 18px 10px!important}
+      .ev-pag-compacto>.ev-pag-erro{margin-top:0!important;margin-bottom:0!important}
+      @media(max-width:650px){.ev-pag-compacto .ev-pag-campos,.ev-pag-compacto .ev-pag-totais{grid-template-columns:1fr}}
     `}</style>
   </main>;
 }

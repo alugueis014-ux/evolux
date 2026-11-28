@@ -1,5 +1,9 @@
 "use client";
+import VendasLancamento from "./VendasLancamento";
+import RelatorioVendas from "./RelatorioVendas";
 import RecuperacoesPainel from "./RecuperacoesPainel";
+import Boletos from "./Boletos";
+import HistoricoAcessos from "./HistoricoAcessos";
 import FinanceiroModal from "./FinanceiroModal";
 import FormasPagamentoModal from "./FormasPagamentoModal";
 
@@ -28,9 +32,10 @@ type Movimento = { id: string; tipo: "entrada" | "saida"; quantidade: number; cu
 const formInicial: ProdutoForm = { descricao:"", codigo_barras:"", unidade:"UN", preco_custo:"0", preco_venda:"0", ativo:true, estoque_atual:"0" };
 const moeda = (n: number) => Number(n).toLocaleString("pt-BR", { style:"currency", currency:"BRL" });
 
-type IconName = "box" | "users" | "layers" | "cart" | "cash" | "wallet" | "truck" | "file" | "cloud" | "logout" | "home" | "bell";
+type IconName = "book" | "box" | "users" | "layers" | "cart" | "cash" | "wallet" | "truck" | "file" | "cloud" | "logout" | "home" | "bell";
 function Icon({ name, size = 26 }: { name: IconName; size?: number }) {
   const paths: Record<IconName, React.ReactNode> = {
+    book: <><path d="M4 3h15v18H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2ZM6 3v18M9 8h7M9 12h7"/></>,
     box: <><path d="m3 7 9-4 9 4-9 4-9-4Z"/><path d="M3 7v10l9 4 9-4V7M12 11v10"/></>,
     users: <><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2H3ZM17 5a3 3 0 0 1 0 6M17 14a5 5 0 0 1 4 5v1h-3"/></>,
     layers: <><path d="m3 9 9-5 9 5-9 5-9-5ZM3 14l9 5 9-5M3 19l9 4 9-4"/></>,
@@ -52,12 +57,39 @@ const menu: { label: string; icon: IconName; detail: string }[] = [
   { label: "Clientes", icon: "users", detail: "Cadastro de clientes" },
   { label: "Vender (PDV)", icon: "cart", detail: "Frente de caixa" },
   { label: "Caixa", icon: "cash", detail: "Abertura e fechamento" },
+  { label: "Livro de Caixa", icon: "book", detail: "Fechamentos e movimentações de caixa" },
   { label: "Financeiro", icon: "wallet", detail: "Gestão financeira" },
   { label: "Notas Fiscais", icon: "file", detail: "Documentos fiscais" },
   { label: "Backup", icon: "cloud", detail: "Cópias de segurança" },
 ];
 
+type SolicitacaoRemota = {id:string;operador_id:string;operacao:string;referencia:string;expira_em:string;dados:{motivo?:string;pagamentos?:{forma:string;valor:number;modalidade?:string;bandeira?:string;parcelas?:number}[];itens?:{id:string;descricao:string;quantidade:number;preco:number}[]}};
+function CentralAutorizacoes({alertas,onBoletos}:{alertas:number|null;onBoletos:()=>void}){
+ const [permissao,setPermissao]=useState("");
+ const [ultimo,setUltimo]=useState<string|null>(null);
+ const [lista,setLista]=useState<SolicitacaoRemota[]>([]);
+ const [aberta,setAberta]=useState(false);
+ const [erro,setErro]=useState("");
+ const [ocupado,setOcupado]=useState(false);
+ async function api(body?:object){
+  const sessao=await supabase?.auth.getSession();const token=sessao?.data.session?.access_token;
+  if(!token)throw new Error("Sessão expirada.");
+  const r=await fetch("/api/autorizacoes-remotas",{method:body?"POST":"GET",headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},cache:"no-store",...(body?{body:JSON.stringify(body)}:{})});
+  const d=await r.json();if(!r.ok)throw new Error(d.error||"Falha na consulta.");return d;
+ }
+ useEffect(()=>{let ativo=true;let consultando=false;async function consultar(){if(consultando)return;consultando=true;try{const d=await api();if(ativo){setLista(d.solicitacoes||[]);setErro("");}}catch(e){if(ativo){setLista([]);setErro(e instanceof Error?e.message:"Falha na consulta.");}}finally{consultando=false;}}void consultar();const t=window.setInterval(()=>void consultar(),3000);return()=>{ativo=false;window.clearInterval(t);};},[]);
+ useEffect(()=>{if(typeof Notification!=="undefined")setPermissao(Notification.permission)},[]);
+ useEffect(()=>{const chave=lista.map(x=>x.id).sort().join(",")+":"+(alertas??0);if(ultimo===chave)return;setUltimo(chave);if(ultimo===null||permissao!=="granted"||(!lista.length&&!alertas))return;void navigator.serviceWorker?.getRegistration().then(r=>r?.showNotification("EVOLUX — Avisos",{body:"Existem pendências para conferir no sistema.",icon:"/icons/icon-192.png",tag:"evolux-pendencias"})).catch(console.error)},[lista,alertas,ultimo,permissao]);
+ async function decidir(id:string,decisao:"aprovar"|"recusar"){
+  if(ocupado)return;if(!window.confirm(decisao==="aprovar"?"Autorizar esta operação?":"Recusar esta solicitação?"))return;
+  setOcupado(true);setErro("");try{await api({acao:"decidir",id,decisao});setLista(a=>a.filter(x=>x.id!==id));}catch(e){setErro(e instanceof Error?e.message:"Falha na decisão.");}finally{setOcupado(false);}
+ }
+ return <><button type="button" className="ev-top-exit" title="Central de notificações" aria-label={`Central de notificações: ${lista.length+(alertas??0)} pendentes`} onClick={()=>setAberta(true)}><Icon name="bell" size={21}/>{lista.length+(alertas??0)>0&&<span style={{background:"#b91c1c",borderRadius:12,padding:"2px 7px"}}>{lista.length+(alertas??0)}</span>}</button>
+ {aberta&&<div role="presentation" style={{position:"fixed",inset:0,zIndex:3000,background:"#07162f99",display:"grid",placeItems:"center",padding:12}}><section role="dialog" aria-modal="true" aria-label="Central de notificações" style={{background:"white",color:"#10234b",width:"min(680px,100%)",maxHeight:"90dvh",borderRadius:12,overflow:"auto"}}><div style={{background:"#0b2454",color:"white",padding:16,display:"flex",justifyContent:"space-between",alignItems:"center"}}><strong>Central de notificações</strong><button className="ev-top-exit" onClick={()=>setAberta(false)}>×</button></div><div style={{padding:16}}><button type="button" onClick={async()=>{if(typeof Notification!=="undefined")setPermissao(await Notification.requestPermission());else setPermissao("indisponível")}} style={{padding:8,cursor:"pointer"}}>Ativar notificações do dispositivo</button><p>Permissão: {permissao||"não consultada"}</p><button type="button" style={{padding:8,cursor:"pointer"}} onClick={()=>{setAberta(false);onBoletos()}}>Boletos próximos ou vencidos: {alertas??"indisponível"}</button><h3>Autorizações remotas</h3>{erro&&<p role="alert" style={{color:"#b91c1c"}}>{erro}</p>}{!lista.length&&!erro&&<p>Nenhuma solicitação pendente.</p>}{lista.map(a=><article key={a.id} style={{border:"1px solid #dbe4f1",borderRadius:9,padding:12,marginBottom:12}}><strong>{a.operacao==="apagar_item"?"Excluir produto lançado":a.operacao==="cancelar_venda"?"Cancelar venda":a.operacao==="corrigir_pagamento"?"Alterar pagamento":"Cancelar lançamento"}</strong><p>Operador: {a.operador_id}</p>{a.dados?.motivo&&<><p>Venda: {a.referencia}</p><p>Motivo: {a.dados.motivo}</p></>}{a.dados?.pagamentos?.map((p,i)=><p key={i}>{p.forma} {p.modalidade} {p.bandeira} {p.parcelas?`${p.parcelas}x`:""} — {moeda(p.valor)}</p>)}<p>Validade: {new Date(a.expira_em).toLocaleTimeString("pt-BR")}</p>{(Array.isArray(a.dados?.itens)?a.dados.itens:[]).filter(i=>a.operacao!=="apagar_item"||i.id===a.referencia).map((i,n)=><p key={n}>{i.descricao} — {i.quantidade} × {moeda(i.preco)}</p>)}<div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>{(["recusar","aprovar"] as const).map(d=><button key={d} disabled={ocupado} onClick={()=>void decidir(a.id,d)} style={{background:d==="aprovar"?"#15803d":"#b91c1c",color:"white",border:0,borderRadius:7,padding:"10px 16px",cursor:ocupado?"not-allowed":"pointer"}}>{d==="aprovar"?"Autorizar":"Recusar"}</button>)}</div></article>)}</div></section></div>}</>;
+}
+
 export default function Dashboard() {
+  const [vendasLancamento,setVendasLancamento]=useState("");
   const router = useRouter();
   const [nome, setNome] = useState("");
   const [usuario, setUsuario] = useState("");
@@ -65,19 +97,27 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [erro, setErro] = useState("");
   const [aviso, setAviso] = useState("");
-  const [aba, setAba] = useState("Cadastros");
-  const [cadastrosMenuAberto, setCadastrosMenuAberto] = useState(false);
-  const [menuSuperior,setMenuSuperior]=useState<"Lançamentos"|"Relatórios"|null>(null);
+  const [menuSuperior,setMenuSuperior]=useState<"Cadastros"|"Lançamentos"|"Relatórios"|null>(null);
+  const cadastrosMenuAberto = menuSuperior === "Cadastros";
   const [relatorioAberto,setRelatorioAberto]=useState("");
   const [relatorioDados,setRelatorioDados]=useState<Record<string,unknown>[]>([]);
   const [relatorioErro,setRelatorioErro]=useState("");
   const [relatorioCarregando,setRelatorioCarregando]=useState(false);
-  const [kpis,setKpis]=useState<{vendas:number;faturamento:number;estoque:number}|null>(null);
+  const [kpis,setKpis]=useState<{vendas:number;faturamento:number;estoque:number;produtos:number;pendentes:number|null;vencidos:number|null;alertas:number|null;recentes:{id:string;numero:number;total:number;criada_em:string}[]}|null>(null);
+  const [erroKpis,setErroKpis]=useState("");
+  const [boletosAberto,setBoletosAberto]=useState("");
+  const [backupAberto,setBackupAberto]=useState(false);
+  const [backupUltimo,setBackupUltimo]=useState("");
+  const tokenGestao=async()=>{const s=await supabase?.auth.getSession();if(!s?.data.session)throw Error("Sessão expirada");return s.data.session.access_token;};
   const [backupOcupado,setBackupOcupado]=useState(false);
+  const [backupMensagem,setBackupMensagem]=useState("");
+  const [backupErro,setBackupErro]=useState(false);
+  useEffect(()=>{if(!backupAberto)return;const fechar=(e:KeyboardEvent)=>{if(e.key==="Escape"&&!backupOcupado){e.preventDefault();setBackupAberto(false);}};window.addEventListener("keydown",fechar);return()=>window.removeEventListener("keydown",fechar);},[backupAberto,backupOcupado]);
 
   const [saindo, setSaindo] = useState(false);
   const [trocandoUsuario, setTrocandoUsuario] = useState(false);
   const [produtosAberto, setProdutosAberto] = useState(false);
+  const [livroAberto, setLivroAberto] = useState(false);
   const [financeiroAberto, setFinanceiroAberto] = useState(false);
   const [pagamentosAberto, setPagamentosAberto] = useState(false);
   const [clientesAberto,setClientesAberto] = useState(false);
@@ -117,13 +157,15 @@ export default function Dashboard() {
   const [abaProduto, setAbaProduto] = useState<"dados" | "grade" | "fornecedores">("dados");
 
   // Apenas um cadastro principal por vez; preserva sub-janelas do cadastro ativo.
-  function abrirJanela(tipo: "produtos"|"clientes"|"fornecedores"|"empresa"|"caixa"|"notas"|"xml"|"entradas"|"despesas"|"usuarios"|"pagamentos") {
+  function abrirJanela(tipo: "produtos"|"clientes"|"fornecedores"|"empresa"|"caixa"|"notas"|"xml"|"entradas"|"despesas"|"usuarios"|"pagamentos"|"livro"|"financeiro") {
     if (cadastroAberto || historicoAberto) {
       if (!window.confirm("Existe uma janela de produto em edição ou consulta. Deseja fechá-la para abrir outra função? Alterações não salvas poderão ser perdidas.")) return;
     }
-    setCadastrosMenuAberto(false);
+    setMenuSuperior(null);
     setAviso("");
     setProdutosAberto(false);
+    setLivroAberto(false);
+    setFinanceiroAberto(false);
     setPagamentosAberto(false);
     setClientesAberto(false);
     setFornecedoresAberto(false);
@@ -137,6 +179,8 @@ export default function Dashboard() {
     setCadastroAberto(false);
     setHistoricoAberto(false);
     if (tipo === "produtos") { setPesquisaProduto(""); setProdutosAberto(true); }
+    else if (tipo === "livro") setLivroAberto(true);
+    else if (tipo === "financeiro") setFinanceiroAberto(true);
     else if (tipo === "pagamentos") setPagamentosAberto(true);
     else if (tipo === "clientes") setClientesAberto(true);
     else if (tipo === "fornecedores") setFornecedoresAberto(true);
@@ -149,13 +193,22 @@ export default function Dashboard() {
     else if (tipo === "entradas") setNotasEntradaAbertas(true);
   }
   function abrirCadastroMenu(acao: string) {
+    setMenuSuperior(null);
     if (acao === "produtos" || acao === "clientes" || acao === "fornecedores" || acao === "empresa" || acao === "despesas" || acao === "usuarios" || acao === "pagamentos" || acao === "taxas_cartoes") abrirJanela(acao === "taxas_cartoes" ? "pagamentos" : acao);
-    else { setCadastrosMenuAberto(false); setAviso("Funcionalidade ainda em desenvolvimento."); }
+    else { setMenuSuperior(null); setAviso("Funcionalidade ainda em desenvolvimento."); }
   }
 
+  const [arquivoBackup,setArquivoBackup]=useState<File|null>(null);
+  const [previaBackup,setPreviaBackup]=useState<Record<string,{novos:number;existentes:number}>|null>(null);
+  async function importarBackup(aplicar:boolean){
+    if(!supabase||!arquivoBackup||backupOcupado)return;
+    if(aplicar&&!window.confirm("Restaurar somente clientes e fornecedores ausentes? Os registros existentes não serão alterados."))return;
+    setBackupOcupado(true);setBackupMensagem("");setBackupErro(false);setPreviaBackup(null);
+    try{if(arquivoBackup.size>9000000)throw new Error("Arquivo excede 9 MB.");const arquivo=JSON.parse(await arquivoBackup.text());const {data:{session}}=await supabase.auth.getSession();if(!session)throw new Error("Sessão expirada.");const r=await fetch("/api/backup",{method:"POST",headers:{Authorization:`Bearer ${session.access_token}`,"Content-Type":"application/json"},body:JSON.stringify({acao:aplicar?"restaurar":"validar",arquivo,confirmacao:aplicar?"RESTAURAR":""})});const d=await r.json();if(!r.ok)throw new Error(d.error);if(!aplicar)setPreviaBackup(d);setBackupMensagem(aplicar?"Restauração de cadastros concluída.":"Arquivo validado. Confira a prévia.");}catch(e){setBackupErro(true);setBackupMensagem(e instanceof Error?e.message:"Falha na importação.");}finally{setBackupOcupado(false);}
+  }
   async function exportarBackup(){
     if(!supabase||!empresaId||backupOcupado)return;
-    setBackupOcupado(true);setAviso("");
+    setBackupOcupado(true);setAviso("");setBackupMensagem("");setBackupErro(false);
     try{
       const {data:{session}}=await supabase.auth.getSession();
       if(!session)throw new Error("Sessão expirada.");
@@ -165,12 +218,13 @@ export default function Dashboard() {
       const url=URL.createObjectURL(blob);
       const a=document.createElement("a");a.href=url;a.download=`evolux-backup-${new Date().toISOString().slice(0,10)}.json`;a.click();
       URL.revokeObjectURL(url);
-      setAviso("Exportação de dados concluída. Este arquivo não é um backup restaurável completo do Supabase; guarde-o em local seguro.");
-    }catch(e){setAviso(e instanceof Error?e.message:"Não foi possível exportar.");}
+      setBackupUltimo(new Date().toLocaleString("pt-BR")+" — "+Math.ceil(blob.size/1024)+" KB");
+      setBackupMensagem("Arquivo gerado. Confira o download no navegador.");
+    }catch(e){setBackupErro(true);setBackupMensagem(e instanceof Error?e.message:"Não foi possível exportar.");}
     finally{setBackupOcupado(false);}
   }
   async function abrirRelatorio(tipo:string){
-    setMenuSuperior(null);setRelatorioAberto(tipo);setRelatorioDados([]);setRelatorioErro("");setRelatorioCarregando(true);
+    setMenuSuperior(null);if(tipo==="pendentes"){setBoletosAberto("alertas");return;}setRelatorioAberto(tipo);if(tipo==="vendas"||tipo==="acessos")return;setRelatorioDados([]);setRelatorioErro("");setRelatorioCarregando(true);
     try{
       if(!supabase)throw new Error("Conexão indisponível.");
       const {data:{session}}=await supabase.auth.getSession();
@@ -185,49 +239,54 @@ export default function Dashboard() {
     setMenuSuperior(null);
     if(tipo==="contas"){abrirJanela("despesas");return;}
     if(tipo==="movimentacao"){abrirJanela("caixa");return;}
-    if(tipo==="segunda_via"){router.push("/pdv?acao=consulta");return;}
-    if(tipo==="cancelamento"){router.push("/pdv?acao=cancelamento");return;}
+    if(tipo==="segunda_via"){setVendasLancamento("segunda_via");return;}
+    if(tipo==="cancelamento"){setVendasLancamento("cancelamento");return;}
   }
   useEffect(()=>{
     if(!supabase||!empresaId)return;
-    let ativo=true;
+    let ativo=true, ocupado=false;
+    setKpis(null);setErroKpis("");
     async function atualizar(){
-      if(!supabase)return;
+      if(!supabase||ocupado)return;ocupado=true;
+      const db=supabase;
+      try{
       const hoje=new Intl.DateTimeFormat("en-CA",{timeZone:"America/Sao_Paulo",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date());
-      const mes=hoje.slice(0,7);
-      const [ano,numeroMes]=mes.split("-").map(Number);
+      const mes=hoje.slice(0,7);const [ano,numeroMes]=mes.split("-").map(Number);
       const inicioHoje=new Date(hoje+"T00:00:00-03:00").toISOString();
+      const fimHoje=new Date(new Date(inicioHoje).getTime()+86400000).toISOString();
       const inicioMes=new Date(`${mes}-01T00:00:00-03:00`).toISOString();
       const fimMes=new Date(Date.UTC(ano,numeroMes,1,3)).toISOString();
-      const [vendasDia,vendasMes,estoque]=await Promise.all([
-        supabase.from("vendas").select("id",{count:"exact",head:true}).eq("empresa_id",empresaId).eq("situacao","concluida").gte("criada_em",inicioHoje),
-        supabase.from("vendas").select("total").eq("empresa_id",empresaId).eq("situacao","concluida").gte("criada_em",inicioMes).lt("criada_em",fimMes).limit(10000),
-        supabase.from("produtos").select("estoque_atual").eq("empresa_id",empresaId).eq("ativo",true).limit(10000)
-      ]);
-      if(ativo&&!vendasDia.error&&!vendasMes.error&&!estoque.error)
-        setKpis({vendas:vendasDia.count||0,faturamento:(vendasMes.data||[]).reduce((a,v)=>a+Number(v.total||0),0),estoque:(estoque.data||[]).reduce((a,v)=>a+Number(v.estoque_atual||0),0)});
+      const prazo=new Date(new Date(inicioHoje).getTime()+3*86400000).toISOString().slice(0,10);
+      async function vendasMes(){let total=0;for(let i=0;;i+=500){const r=await db.from("vendas").select("total").eq("empresa_id",empresaId).eq("situacao","concluida").gte("criada_em",inicioMes).lt("criada_em",fimMes).order("id").range(i,i+499);if(r.error)throw r.error;total+=r.data.reduce((a,v)=>a+Number(v.total||0),0);if(r.data.length<500)return total;}}
+      async function estoqueAtual(){let total=0,produtos=0;for(let i=0;;i+=500){const r=await db.from("produtos").select("estoque_atual").eq("empresa_id",empresaId).eq("ativo",true).order("id").range(i,i+499);if(r.error)throw r.error;produtos+=r.data.length;total+=r.data.reduce((a,v)=>a+Number(v.estoque_atual||0),0);if(r.data.length<500)return {total,produtos};}}
+      async function boletos(){try{const token=await tokenGestao();const r=await fetch("/api/boletos",{headers:{Authorization:`Bearer ${token}`},cache:"no-store"});if(!r.ok)throw Error();const d=await r.json();const rows=(d.rows as {situacao:string;valor:number;vencimento:string}[]).filter(x=>x.situacao==="pendente");return {pendentes:rows.reduce((a,x)=>a+Number(x.valor),0),vencidos:rows.filter(x=>x.vencimento<hoje).reduce((a,x)=>a+Number(x.valor),0),alertas:rows.filter(x=>x.vencimento<=prazo).length};}catch{return {pendentes:null,vencidos:null,alertas:null};}}
+      const [dia,mesTotal,estoque,rec,b]=await Promise.all([db.from("vendas").select("id",{count:"exact",head:true}).eq("empresa_id",empresaId).eq("situacao","concluida").gte("criada_em",inicioHoje).lt("criada_em",fimHoje),vendasMes(),estoqueAtual(),db.from("vendas").select("id,numero,total,criada_em").eq("empresa_id",empresaId).eq("situacao","concluida").order("criada_em",{ascending:false}).limit(6),boletos()]);
+      if(dia.error||rec.error)throw dia.error||rec.error;
+      if(ativo){setKpis({vendas:dia.count||0,faturamento:mesTotal,estoque:estoque.total,produtos:estoque.produtos,recentes:rec.data||[],...b});setErroKpis("");}
+      }catch{if(ativo)setErroKpis("Não foi possível atualizar os indicadores. Tentaremos novamente automaticamente.");}finally{ocupado=false;}
     }
-    void atualizar();return()=>{ativo=false};
+    void atualizar();const timer=window.setInterval(()=>void atualizar(),15000);window.addEventListener("focus",atualizar);return()=>{ativo=false;window.clearInterval(timer);window.removeEventListener("focus",atualizar);};
   },[empresaId]);
   useEffect(() => {
-    if (!cadastrosMenuAberto) return;
+    if (!menuSuperior) return;
     const click = (e: MouseEvent) => {
-      if (!(e.target as HTMLElement).closest(".ev-cadastros-anchor")) setCadastrosMenuAberto(false);
+      if (!(e.target as HTMLElement).closest(".ev-tabs")) setMenuSuperior(null);
     };
-    const key = (e: KeyboardEvent) => { if (e.key === "Escape") setCadastrosMenuAberto(false); };
+    const key = (e: KeyboardEvent) => { if (e.key === "Escape") setMenuSuperior(null); };
     document.addEventListener("mousedown", click);
     document.addEventListener("keydown", key);
     return () => { document.removeEventListener("mousedown", click); document.removeEventListener("keydown", key); };
-  }, [cadastrosMenuAberto]);
+  }, [menuSuperior]);
 
+  useEffect(()=>{if(!financeiroAberto)return;const fechar=(e:KeyboardEvent)=>{if(e.key==="Escape")setFinanceiroAberto(false)};window.addEventListener("keydown",fechar);return()=>window.removeEventListener("keydown",fechar);},[financeiroAberto]);
   // Atalhos do painel: F2 Venda, F3 Caixa, F4 Financeiro,
   // F5 Compras, F6 Notas Fiscais, F7 Backup.
   // Não interceptar teclas quando houver janelas abertas ou campos em edição.
   useEffect(() => {
     function atalhosPainel(event: KeyboardEvent) {
       if (event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
-      if (empresaAberta || cadastrosMenuAberto || produtosAberto || clientesAberto || fornecedoresAberto || despesasAberto || usuariosAberto || importacaoXmlAberta ||
-          notasEntradaAbertas || menuNotasAberto || cadastroAberto || historicoAberto || caixaAberto) return;
+      if (vendasLancamento || empresaAberta || menuSuperior || produtosAberto || clientesAberto || fornecedoresAberto || despesasAberto || usuariosAberto || importacaoXmlAberta ||
+          notasEntradaAbertas || menuNotasAberto || cadastroAberto || historicoAberto || caixaAberto || livroAberto || financeiroAberto || boletosAberto || backupAberto || relatorioAberto || pagamentosAberto) return;
       const alvo = event.target as HTMLElement | null;
       if (alvo?.closest("input, textarea, select, [contenteditable='true']")) return;
 
@@ -236,9 +295,11 @@ export default function Dashboard() {
       if (event.key === "F3") {
         event.preventDefault(); abrirJanela("caixa");
       } else if (event.key === "F4") {
-        event.preventDefault(); setFinanceiroAberto(true);
+        event.preventDefault(); abrirJanela("financeiro");
+      } else if (event.key === "F5") {
+        event.preventDefault(); abrirJanela("livro");
       } else if (event.key === "F7") {
-        event.preventDefault(); void exportarBackup();
+        event.preventDefault(); setBackupAberto(true);
 
       } else if (event.key === "F6") {
         event.preventDefault(); abrirJanela("notas");
@@ -246,8 +307,8 @@ export default function Dashboard() {
     }
     window.addEventListener("keydown", atalhosPainel);
     return () => window.removeEventListener("keydown", atalhosPainel);
-  }, [empresaAberta, cadastrosMenuAberto, produtosAberto, clientesAberto, fornecedoresAberto, despesasAberto, importacaoXmlAberta,
-      notasEntradaAbertas, menuNotasAberto, cadastroAberto, historicoAberto, caixaAberto]);
+  }, [vendasLancamento, empresaAberta, menuSuperior, produtosAberto, clientesAberto, fornecedoresAberto, despesasAberto, importacaoXmlAberta,
+      notasEntradaAbertas, menuNotasAberto, cadastroAberto, historicoAberto, caixaAberto, livroAberto, financeiroAberto, boletosAberto, backupAberto, relatorioAberto, pagamentosAberto, usuariosAberto]);
 
   useEffect(()=>{
     if(!caixaAberto)return;
@@ -511,19 +572,20 @@ export default function Dashboard() {
         <div className="ev-brand ev-brand-modelo2"><img src="/evolux-logo.svg" alt="" width="39" height="39"/><strong>EVOLU<span>X</span></strong><i/><span className="ev-brand-sub">Gestão Empresarial</span></div>
         <div className="ev-company" title={nome || "Empresa"}><Icon name="home" size={20}/><span>{loading ? "Carregando empresa..." : nome || "Empresa"}</span></div>
         <div className="ev-user"><Icon name="users" size={20}/><span>{usuario || "Usuário"}<small>Conta autenticada</small></span></div>
+        <CentralAutorizacoes alertas={kpis?.alertas??null} onBoletos={()=>setBoletosAberto("alertas")}/>
         <button className="ev-top-exit" type="button" onClick={()=>void trocarUsuario()} disabled={trocandoUsuario}>{trocandoUsuario?'Trocando...':'Trocar usuário'}</button>
         <button className="ev-top-exit" type="button" onClick={sair} disabled={saindo}><Icon name="logout" size={19}/>{saindo ? "Saindo..." : "Sair"}</button>
       </div>
     </header>
     <nav className="ev-tabs" aria-label="Menu superior">
       <div className="ev-cadastros-anchor">
-        <button type="button" className={aba==="Cadastros"?"active":""} aria-expanded={cadastrosMenuAberto} aria-haspopup="menu" onClick={()=>{setAba("Cadastros");setAviso("");setCadastrosMenuAberto(v=>!v)}}>Cadastros <span aria-hidden="true">▾</span></button>
+        <button type="button" className={cadastrosMenuAberto?"active":""} aria-expanded={cadastrosMenuAberto} aria-haspopup="menu" onClick={()=>{setAviso("");setMenuSuperior(v=>v==="Cadastros"?null:"Cadastros")}}>Cadastros <span aria-hidden="true">▾</span></button>
         {cadastrosMenuAberto&&<div className="ev-cadastros-menu" role="menu" aria-label="Cadastros">
           {([["usuarios","Cadastro de administradores e vendedores","♧"],["clientes","Cadastro de clientes","♙"],["despesas","Cadastro de Despesas","▤"],["fornecedores","Cadastro de fornecedores","▤"],["pagamentos","Cadastro de formas de pagamento","▦"],["taxas_cartoes","Cadastro de taxas de cartões","▦"],["empresa","Cadastro de informações da empresa","⌂"],["produtos","Cadastro de produtos","▣"]] as const).map(([acao,titulo,icone])=><button key={acao} type="button" role="menuitem" onClick={()=>abrirCadastroMenu(acao)}><span className="ev-cadastros-icone" aria-hidden="true">{icone}</span><span>{titulo}</span></button>)}
         </div>}
       </div>
       {(["Lançamentos","Relatórios"] as const).map(item=><div key={item} className="ev-cadastros-anchor">
-        <button type="button" className={menuSuperior===item?"active":""} onClick={()=>{setCadastrosMenuAberto(false);setMenuSuperior(v=>v===item?null:item);setAba(item)}}>{item} ▾</button>
+        <button type="button" className={menuSuperior===item?"active":""} aria-expanded={menuSuperior===item} aria-haspopup="menu" onClick={()=>{setMenuSuperior(v=>v===item?null:item)}}>{item} ▾</button>
         {menuSuperior===item&&<div className="ev-cadastros-menu" role="menu">
           {item==="Lançamentos"?<>
             <button onClick={()=>abrirLancamento("contas")}>Contas a pagar e a receber</button>
@@ -538,7 +600,7 @@ export default function Dashboard() {
     </nav>
     <div className="ev-toolbar" role="navigation" aria-label="Acesso rápido">
       <div className="ev-toolbar-scroll">
-        {menu.map(item => <button type="button" key={item.label} title={item.detail} onClick={() => { if (item.label === "Produtos") { abrirJanela("produtos"); } else if (item.label === "Clientes") { abrirJanela("clientes"); } else if (item.label === "Vender (PDV)") { router.push("/pdv"); } else if (item.label === "Caixa") { abrirJanela("caixa"); } else if (item.label === "Financeiro") { setFinanceiroAberto(true); } else if (item.label === "Notas Fiscais") { abrirJanela("notas"); } else if(item.label==="Backup"){void exportarBackup();}else setAviso(`${item.label}: módulo ainda em desenvolvimento.`); }}><Icon name={item.icon} size={30}/><span>{item.label}</span>{({"Produtos":"F1","Clientes":"F2","Caixa":"F3","Financeiro":"F4","Notas Fiscais":"F6","Backup":"F7"} as Record<string,string>)[item.label] && <small className="ev-toolbar-hotkey">{({"Produtos":"F1","Clientes":"F2","Caixa":"F3","Financeiro":"F4","Notas Fiscais":"F6","Backup":"F7"} as Record<string,string>)[item.label]}</small>}</button>)}
+        {menu.map(item => <button type="button" key={item.label} title={item.detail} onClick={() => { if (item.label === "Produtos") { abrirJanela("produtos"); } else if (item.label === "Clientes") { abrirJanela("clientes"); } else if (item.label === "Vender (PDV)") { router.push("/pdv"); } else if (item.label === "Caixa") { abrirJanela("caixa"); } else if (item.label === "Livro de Caixa") { abrirJanela("livro"); } else if (item.label === "Financeiro") { abrirJanela("financeiro"); } else if (item.label === "Notas Fiscais") { abrirJanela("notas"); } else if(item.label==="Backup"){setBackupAberto(true);}else setAviso(`${item.label}: módulo ainda em desenvolvimento.`); }}><Icon name={item.icon} size={30}/><span>{item.label}</span>{({"Produtos":"F1","Clientes":"F2","Caixa":"F3","Financeiro":"F4","Livro de Caixa":"F5","Notas Fiscais":"F6","Backup":"F7"} as Record<string,string>)[item.label] && <small className="ev-toolbar-hotkey">{({"Produtos":"F1","Clientes":"F2","Caixa":"F3","Financeiro":"F4","Livro de Caixa":"F5","Notas Fiscais":"F6","Backup":"F7"} as Record<string,string>)[item.label]}</small>}</button>)}
         <button type="button" onClick={sair} disabled={saindo}><Icon name="logout" size={30}/><span>Sair</span></button>
       </div>
     </div>
@@ -547,17 +609,37 @@ export default function Dashboard() {
         <div className="ev-intro"><h1><Icon name="home" size={29}/> Painel de Gestão</h1><p>{loading ? "Carregando dados da empresa..." : `Bem-vindo à ${nome}. Acompanhe os principais recursos da sua empresa.`}</p></div>
         {aviso && <div className="ev-info" role="status"><span>{aviso}</span><button type="button" onClick={() => setAviso("")} aria-label="Fechar aviso">×</button></div>}
         {pendente && <div className="ev-pending"><strong>Cadastro da empresa incompleto.</strong> Complete os dados quando puder. <Link href="/completar-cadastro">Completar cadastro →</Link></div>}
-        <div className="ev-kpis">
-          <article role="button" tabIndex={0} onClick={()=>router.push("/pdv?acao=consulta")} onKeyDown={e=>{if(e.key==="Enter")router.push("/pdv?acao=consulta")}} style={{cursor:"pointer"}}><span className="ev-kpi-icon blue"><Icon name="cart"/></span><div><span>Vendas (hoje)</span><strong>{kpis?kpis.vendas:"—"}</strong><small>Abrir consulta de vendas</small></div></article>
-          <article role="button" tabIndex={0} onClick={()=>setFinanceiroAberto(true)} onKeyDown={e=>{if(e.key==="Enter")setFinanceiroAberto(true)}} style={{cursor:"pointer"}}><span className="ev-kpi-icon green"><Icon name="wallet"/></span><div><span>Faturamento (mês)</span><strong>{kpis?moeda(kpis.faturamento):"—"}</strong><small>Abrir financeiro</small></div></article>
-          <article role="button" tabIndex={0} onClick={()=>abrirJanela("produtos")} onKeyDown={e=>{if(e.key==="Enter")abrirJanela("produtos")}} style={{cursor:"pointer"}}><span className="ev-kpi-icon amber"><Icon name="layers"/></span><div><span>Produtos em estoque</span><strong>{kpis?kpis.estoque.toLocaleString("pt-BR"):"—"}</strong><small>Abrir cadastro de produtos</small></div></article>
+        {erroKpis&&<div className="ev-error" role="alert">{erroKpis}</div>}
+        <div className="ev-kpis ev-kpis-real">
+          {([
+            ["cart","blue","Vendas (hoje)",kpis?.vendas,"Consultar vendas",()=>void abrirRelatorio("vendas")],
+            ["wallet","green","Faturamento (mês)",kpis?moeda(kpis.faturamento):null,"Abrir relatório de vendas",()=>void abrirRelatorio("vendas")],
+            ["box","blue","Produtos cadastrados",kpis?.produtos.toLocaleString("pt-BR"),"Produtos ativos",()=>abrirJanela("produtos")],
+            ["layers","amber","Unidades em estoque",kpis?.estoque.toLocaleString("pt-BR",{maximumFractionDigits:3}),"Consultar estoque",()=>abrirJanela("produtos")],
+            ["file","purple","Contas a pagar",kpis?.pendentes!=null?moeda(kpis.pendentes):null,"Gestão de boletos",()=>setBoletosAberto("todos")],
+            ["bell","amber","Boletos vencidos",kpis?.vencidos!=null?moeda(kpis.vencidos):null,"Alertas de vencimento",()=>setBoletosAberto("alertas")]
+          ] as [IconName,string,string,string|number|null|undefined,string,()=>void][]).map(([icone,cor,titulo,valor,descricao,acao])=><button type="button" className="ev-kpi-action" key={titulo} onClick={acao}><span className={`ev-kpi-icon ${cor}`}><Icon name={icone}/></span><div><span>{titulo}</span><strong>{valor??"—"}</strong><small>{descricao} →</small></div></button>)}
         </div>
-        <div className="ev-bottom-grid"><article className="ev-card"><h2><Icon name="layers" size={22}/> Movimentações recentes</h2><div className="ev-table"><div className="ev-table-head"><span>Data</span><span>Descrição</span><span>Valor</span></div><div className="ev-empty"><Icon name="file" size={33}/><p>O histórico de movimentações estará disponível quando os módulos operacionais forem implementados.</p></div></div></article><article className="ev-card"><h2><Icon name="bell" size={22}/> Avisos e pendências</h2><div className="ev-alert-body"><p>{pendente ? "Há informações pendentes no cadastro da empresa." : "Os avisos operacionais aparecerão quando os módulos forem configurados."}</p><Link href="/completar-cadastro">Dados da empresa →</Link>{empresaId&&<RecuperacoesPainel empresaId={empresaId}/>}</div></article></div>
+        <div className="ev-bottom-grid"><article className="ev-card"><h2><Icon name="layers" size={22}/> Vendas recentes</h2><div className="ev-table"><div className="ev-table-head"><span>Data</span><span>Descrição</span><span>Valor</span></div>{kpis?.recentes.length?kpis.recentes.map(v=><div className="ev-recent-row" key={v.id}><span>{new Date(v.criada_em).toLocaleDateString("pt-BR",{timeZone:"America/Sao_Paulo"})}</span><span>Venda nº {v.numero}</span><span>{moeda(v.total)}</span></div>):<div className="ev-empty">{kpis?"Nenhuma venda concluída.":"Aguardando consulta."}</div>}</div></article><article className="ev-card"><h2><Icon name="bell" size={22}/> Avisos e pendências</h2><div className="ev-alert-body ev-alert-real">{pendente&&<Link href="/completar-cadastro">Completar cadastro da empresa →</Link>}<button type="button" onClick={()=>setBoletosAberto("alertas")}>{kpis?.alertas==null?"Consultar alertas de vencimento":`${kpis.alertas} boleto(s) vencidos ou a vencer em até 3 dias`} →</button><button type="button" onClick={()=>abrirJanela("caixa")}>Consultar conferências de caixa →</button>{empresaId&&<RecuperacoesPainel empresaId={empresaId}/>}</div></article></div>
       </>}
     </section>
-    {relatorioAberto&&<div className="ev-product-overlay" onMouseDown={e=>{if(e.target===e.currentTarget)setRelatorioAberto("")}}><section className="ev-product-window" style={{maxWidth:900,width:"95%",background:"#fff",borderRadius:14,overflow:"hidden"}} role="dialog" aria-modal="true"><div className="ev-product-heading"><h2>{({vendas:"Relatório geral de movimentação em vendas",pendentes:"Pagamentos pendentes da empresa",balancete:"Balanço e balancete financeiro",acessos:"Histórico de acesso ao sistema",informacoes:"Informações gerais"} as Record<string,string>)[relatorioAberto]}</h2><button onClick={()=>setRelatorioAberto("")} aria-label="Fechar">×</button></div><div style={{padding:20,maxHeight:"65vh",overflow:"auto"}}>{relatorioAberto==="balancete"&&<p style={{color:"#9a3412",fontSize:13}}>Demonstrativo gerencial simplificado. Não substitui balanço patrimonial ou balancete contábil.</p>}{relatorioCarregando?<p>Carregando...</p>:relatorioErro?<p role="alert">{relatorioErro}</p>:relatorioDados.length?<table style={{width:"100%",fontSize:13}}><thead><tr>{Object.keys(relatorioDados[0]).map(k=><th key={k} style={{textAlign:"left",padding:8}}>{k}</th>)}</tr></thead><tbody>{relatorioDados.map((r,i)=><tr key={i}>{Object.values(r).map((v,j)=><td key={j} style={{padding:8,borderBottom:"1px solid #ddd"}}>{String(v??"—")}</td>)}</tr>)}</tbody></table>:<p>Nenhum registro encontrado.</p>}</div></section></div>}
+    {relatorioAberto==="vendas"&&<RelatorioVendas fechar={()=>setRelatorioAberto("")} token={async()=>{const s=await supabase?.auth.getSession();if(!s?.data.session)throw Error("Sessão expirada");return s.data.session.access_token;}}/>}
+    {relatorioAberto==="acessos"&&<HistoricoAcessos fechar={()=>setRelatorioAberto("")} token={tokenGestao}/>}
+    {relatorioAberto&&relatorioAberto!=="vendas"&&relatorioAberto!=="acessos"&&<div className="ev-product-overlay" onMouseDown={e=>{if(e.target===e.currentTarget)setRelatorioAberto("")}}><section className="ev-product-window" style={{maxWidth:900,width:"95%",background:"#fff",borderRadius:14,overflow:"hidden"}} role="dialog" aria-modal="true"><div className="ev-product-heading"><h2>{({vendas:"Relatório geral de movimentação em vendas",pendentes:"Pagamentos pendentes da empresa",balancete:"Balanço e balancete financeiro",acessos:"Histórico de acesso ao sistema",informacoes:"Informações gerais"} as Record<string,string>)[relatorioAberto]}</h2><button onClick={()=>setRelatorioAberto("")} aria-label="Fechar">×</button></div><div style={{padding:20,maxHeight:"65vh",overflow:"auto"}}>{relatorioAberto==="balancete"&&<p style={{color:"#9a3412",fontSize:13}}>Demonstrativo gerencial simplificado. Não substitui balanço patrimonial ou balancete contábil.</p>}{relatorioCarregando?<p>Carregando...</p>:relatorioErro?<p role="alert">{relatorioErro}</p>:relatorioDados.length?<table style={{width:"100%",fontSize:13}}><thead><tr>{Object.keys(relatorioDados[0]).map(k=><th key={k} style={{textAlign:"left",padding:8}}>{k}</th>)}</tr></thead><tbody>{relatorioDados.map((r,i)=><tr key={i}>{Object.values(r).map((v,j)=><td key={j} style={{padding:8,borderBottom:"1px solid #ddd"}}>{String(v??"—")}</td>)}</tr>)}</tbody></table>:<p>Nenhum registro encontrado.</p>}</div></section></div>}
         {pagamentosAberto && <FormasPagamentoModal onClose={() => setPagamentosAberto(false)} />}
-    {financeiroAberto && <FinanceiroModal onClose={() => setFinanceiroAberto(false)} />}
+    {vendasLancamento&&<VendasLancamento modo={vendasLancamento} fechar={()=>setVendasLancamento("")} token={tokenGestao} empresaId={empresaId||""}/>}
+    {boletosAberto&&<Boletos fechar={()=>setBoletosAberto("")} token={tokenGestao} alertas={boletosAberto==="alertas"}/>}
+    {backupAberto && <div className="ev-product-overlay" onMouseDown={e=>{if(e.target===e.currentTarget&&!backupOcupado)setBackupAberto(false)}}><section className="ev-backup-compact" role="dialog" aria-modal="true" aria-labelledby="ev-backup-title" style={{width:"min(740px,100%)",maxHeight:"90vh",overflowY:"auto",background:"#fff",borderRadius:16,boxShadow:"0 22px 65px #05143038",color:"#112c54"}}>
+      <header style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,padding:"10px 16px",background:"#0b2454",color:"#fff"}}><h2 id="ev-backup-title" style={{margin:0,fontSize:20,fontWeight:600,display:"flex",alignItems:"center",gap:10}}><Icon name="cloud" size={24}/> Backup</h2><button type="button" aria-label="Fechar" disabled={backupOcupado} onClick={()=>setBackupAberto(false)} style={{width:34,height:34,border:"1px solid #ffffff44",borderRadius:8,background:"#ffffff1c",color:"#fff",fontSize:23,cursor:backupOcupado?"not-allowed":"pointer"}}>×</button></header>
+      <div style={{padding:12,display:"grid",gap:8}}><div><strong style={{fontSize:16}}>Exportação de dados da empresa</strong><p style={{margin:"6px 0 0",fontSize:13,color:"#64748b"}}>Gere uma cópia dos dados disponíveis e guarde o arquivo em um local seguro.</p></div>
+      <div style={{border:"1px solid #dbe4ef",borderRadius:10,padding:10,display:"grid",gap:6,background:"#f8fafc"}}><div style={{display:"flex",justifyContent:"space-between",gap:12,fontSize:14}}><span>Formato do arquivo</span><strong>JSON</strong></div><div style={{display:"flex",justifyContent:"space-between",gap:12,fontSize:14}}><span>Tipo de exportação</span><strong>Manual</strong></div><div style={{borderTop:"1px solid #dbe4ef",paddingTop:6}}><div style={{fontSize:12,color:"#64748b"}}>Última exportação nesta sessão · data, horário e tamanho</div><strong style={{display:"block",marginTop:5,fontSize:14}}>{backupUltimo||"Nenhuma exportação realizada"}</strong></div></div>
+      <div style={{border:"1px solid #dbe4ef",borderRadius:10,padding:10,display:"grid",gap:6}}><strong>Importar e restaurar backup</strong><input type="file" accept=".json,application/json" disabled={backupOcupado} onChange={e=>{setArquivoBackup(e.target.files?.[0]??null);setPreviaBackup(null);}}/><div style={{display:"flex",gap:8,flexWrap:"wrap"}}><button type="button" disabled={!arquivoBackup||backupOcupado} onClick={()=>void importarBackup(false)} style={{padding:10,border:"1px solid #cbd5e1",borderRadius:8,cursor:!arquivoBackup||backupOcupado?"not-allowed":"pointer"}}>Validar arquivo</button><button type="button" disabled={!previaBackup||backupOcupado} onClick={()=>void importarBackup(true)} style={{padding:10,border:0,borderRadius:8,background:"#0b2454",color:"white",cursor:!previaBackup||backupOcupado?"not-allowed":"pointer"}}>Restaurar cadastros</button></div>{previaBackup&&Object.entries(previaBackup).map(([t,v])=><div key={t}>{t}: {v.novos} novos · {v.existentes} existentes</div>)}</div>
+      {backupMensagem&&<div role="status" style={{fontSize:13,padding:10,borderRadius:8,background:backupErro?"#fef2f2":"#ecfdf5",color:backupErro?"#991b1b":"#166534"}}>{backupMensagem}</div>}
+      <div style={{padding:12,border:"1px solid #e2e8f0",borderRadius:8,fontSize:12,color:"#64748b",lineHeight:1.5}}>A exportação é parcial. A restauração recupera somente clientes e fornecedores ausentes; não altera estoque, vendas ou financeiro.</div></div>
+      <footer style={{display:"flex",justifyContent:"flex-end",flexWrap:"wrap",gap:10,padding:"8px 12px",background:"#f8fafc",borderTop:"1px solid #dbe4ef"}}><button type="button" disabled={backupOcupado} onClick={()=>setBackupAberto(false)} style={{padding:"8px 12px",border:"1px solid #cbd5e1",borderRadius:8,background:"#fff",color:"#112c54",fontWeight:600,cursor:backupOcupado?"not-allowed":"pointer"}}>Fechar (ESC)</button><button type="button" disabled={backupOcupado} onClick={()=>void exportarBackup()} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",border:0,borderRadius:8,background:"#0b2454",color:"#fff",fontWeight:600,opacity:backupOcupado ? 0.65 : 1,cursor:backupOcupado?"not-allowed":"pointer"}}><Icon name="cloud" size={18}/>{backupOcupado?"Exportando…":"Gerar e baixar exportação"}</button></footer>
+    </section></div>}
+    {livroAberto && <FinanceiroModal onClose={() => setLivroAberto(false)} />}
+    {financeiroAberto && <div className="ev-product-overlay" onMouseDown={e=>{if(e.target===e.currentTarget)setFinanceiroAberto(false)}}><section className="ev-product-window" role="dialog" aria-modal="true" aria-label="Financeiro" style={{width:"min(620px,95vw)",background:"white",borderRadius:14,overflow:"hidden"}}><div className="ev-product-heading"><h2>Financeiro</h2><button onClick={()=>setFinanceiroAberto(false)} aria-label="Fechar">×</button></div><div style={{padding:20,display:"grid",gap:12}}>{[["Contas a pagar / Gestão de boletos","Cadastrar, consultar, baixar e estornar boletos","todos"],["Alertas de vencimento","Consultar boletos vencidos e próximos do vencimento","alertas"]].map(([titulo,descricao,tipo])=><button key={tipo} onClick={()=>{setFinanceiroAberto(false);setBoletosAberto(tipo)}} style={{textAlign:"left",padding:16,border:"1px solid #dbe4ef",borderRadius:10,background:"#f6f9fe",color:"#112c54",cursor:"pointer"}}><strong>{titulo}</strong><div style={{marginTop:5,fontSize:12}}>{descricao}</div></button>)}<button onClick={()=>abrirJanela("despesas")} style={{textAlign:"left",padding:16,border:"1px solid #dbe4ef",borderRadius:10,background:"#f6f9fe",color:"#112c54",cursor:"pointer"}}><strong>Categorias de despesas</strong></button><p style={{fontSize:12,color:"#64748b"}}>Contas a receber e fluxo de caixa ainda não disponíveis.</p></div></section></div>}
     {usuariosAberto && <UsuariosModal empresaId={empresaId} onClose={()=>setUsuariosAberto(false)}/>}
     {empresaAberta && <div className="ev-product-overlay ev-empresa-overlay" ><section className="ev-empresa-window" role="dialog" aria-modal="true" aria-label="Cadastro de Informações da Empresa"><CompletarCadastro embutido onClose={()=>setEmpresaAberta(false)}/></section></div>}
     {caixaAberto && <div className="ev-product-overlay ev-caixa-overlay" onMouseDown={e=>{if(e.target===e.currentTarget)setCaixaAberto(false)}}>
@@ -636,6 +718,8 @@ export default function Dashboard() {
       .ev-dashboard .ev-empresa-window .company-modal-footer{flex-shrink:0!important;background:#fff!important;border-top:1px solid #dce5f0!important;padding:15px 22px!important;display:flex!important;align-items:center!important;justify-content:space-between!important}
       @media(max-width:650px){.ev-dashboard .ev-empresa-window,.ev-dashboard .ev-product-modal,.ev-dashboard .ev-caixa-window{width:calc(100vw - 16px)!important;height:calc(100dvh - 16px)!important;max-height:calc(100dvh - 16px)!important}}
       .ev-empresa-overlay{z-index:1250}.ev-empresa-window{width:min(920px,100%);height:min(790px,calc(100dvh - 40px));max-height:calc(100dvh - 40px);background:#fff;border-radius:16px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 25px 70px #06152c66;isolation:isolate}
+      .ev-toolbar-scroll button{display:grid!important;grid-template-rows:30px 20px 16px;justify-items:center;align-content:center;gap:6px!important;min-height:100px!important}.ev-toolbar-scroll button>span{white-space:nowrap}.ev-toolbar-scroll button>small{align-self:center}
+      .ev-kpis.ev-kpis-real{grid-template-columns:repeat(3,minmax(0,1fr))}.ev-kpi-action{display:flex;align-items:center;text-align:left;gap:14px;background:#fff;border:1px solid #dbe4f1;border-radius:14px;padding:18px;min-height:110px;color:#10234b;cursor:pointer;min-width:0}.ev-kpi-action>div{display:grid;gap:6px;min-width:0}.ev-kpi-action div>span{font-size:14px;font-weight:700}.ev-kpi-action:hover{border-color:#1765d5;background:#f8fbff}.ev-kpi-action:focus-visible{outline:2px solid #1765d5}.ev-kpi-action strong{overflow-wrap:anywhere}.ev-recent-row{display:grid;grid-template-columns:1fr 3fr 1fr;gap:10px;padding:12px 13px;border-top:1px solid #e0e7f0;font-size:13px}.ev-recent-row span:last-child{text-align:right;white-space:nowrap}.ev-alert-real{display:grid;gap:10px;padding-top:14px}.ev-alert-real>button{border:1px solid #dbe4f1;background:#f7faff;color:#10234b;border-radius:8px;padding:12px;text-align:left;cursor:pointer}.ev-alert-real>button:hover{border-color:#1765d5}@media(max-width:1100px){.ev-kpis.ev-kpis-real{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:650px){.ev-kpis.ev-kpis-real{grid-template-columns:1fr}}
       .ev-toolbar-hotkey{font-size:10px;color:#3865a1;background:#edf4ff;border-radius:5px;padding:2px 6px;line-height:1.2}.ev-toolbar-scroll button:hover .ev-toolbar-hotkey{background:#dcecff}
       .ev-caixa-overlay{z-index:1005}.ev-caixa-window{width:min(1020px,100%);height:min(790px,calc(100dvh - 36px));display:flex;flex-direction:column;background:#fff;border-radius:15px;overflow:hidden;box-shadow:0 30px 80px #06152c66}.ev-caixa-heading{flex-shrink:0;background:#fff}.ev-caixa-window-body{flex:1;min-height:0;overflow-y:auto;background:#f7f9fd}.ev-caixa-footer{flex-shrink:0;background:white}.ev-caixa-window button{cursor:pointer}.ev-caixa-window button:disabled{cursor:not-allowed}@media(max-width:650px){.ev-caixa-window{height:calc(100dvh - 16px)}.ev-caixa-heading h2{font-size:17px}}
       .ev-tabs{overflow:visible!important;position:relative;z-index:1100}.ev-cadastros-anchor{position:relative;flex:0 0 auto}.ev-cadastros-menu{position:absolute;top:100%;left:0;z-index:1200;width:min(390px,calc(100vw - 20px));background:#fff;border:1px solid #cbd8e8;border-radius:0 0 12px 12px;box-shadow:0 18px 45px #071c3c36;padding:7px;display:flex;flex-direction:column}.ev-tabs .ev-cadastros-menu button{border:0!important;background:#fff!important;color:#1c3658!important;display:flex;align-items:center;gap:12px;width:100%;text-align:left;white-space:normal;padding:12px 11px;border-radius:7px;font-size:13px;font-weight:600;cursor:pointer}.ev-tabs .ev-cadastros-menu button:hover,.ev-tabs .ev-cadastros-menu button:focus-visible{background:#eaf2ff!important;color:#0b2454!important}.ev-cadastros-icone{width:24px;color:#1d518f;font-size:19px;text-align:center;flex-shrink:0}.ev-cadastros-menu small{font-size:10px;color:#8291a5;margin-left:auto;white-space:nowrap}@media(max-width:580px){.ev-cadastros-menu small{display:none}}

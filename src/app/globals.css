@@ -131,3 +131,18 @@ body { background: var(--background); color: var(--foreground); }
 /* Monograma EVOLUX na marca do dashboard */
 .ev-dashboard .ev-brand-modelo2 { display: inline-flex; align-items: center; gap: 12px; }
 .ev-dashboard .ev-brand-modelo2::before { content: ""; display: inline-block; flex: 0 0 36px; width: 36px; height: 36px; background: url('/icons/evolux.svg') center/contain no-repeat; border-radius: 9px; }
+
+/* EVOLUX — densidade compacta das janelas; não altera as telas de operação. */
+:is(.ev-product-overlay,.ev-cli-overlay,.ev-cli-form-overlay,.ev-supplier-overlay,.ev-xml-overlay,.ev-ne-overlay,.ev-fin-overlay,.ev-fin-detail-overlay,.ev-desp-overlay,.ev-fp-overlay,.ev-bol-overlay,.ev-turno-overlay) { padding: 10px !important; box-sizing: border-box; }
+:is([role="dialog"],.ev-bol,.ev-product-window,.ev-desp-window,.ev-desp-form-window,.ev-fp-window,.ev-hist-modal,.ev-correcao-modal,.ev-turno-modal) { max-height: calc(100dvh - 20px) !important; box-sizing: border-box; }
+:is([role="dialog"],.ev-bol,.ev-product-window,.ev-desp-window,.ev-desp-form-window,.ev-fp-window,.ev-hist-modal,.ev-correcao-modal,.ev-turno-modal) :is(.ev-product-heading,.ev-cli-header,.ev-supplier-head,.ev-xml-head,.ev-fin-head,.ev-desp-head,.ev-fp-head,.ev-hist-topo,.ev-correcao-topo) { padding: 8px 14px !important; min-height: 0 !important; flex-shrink: 0; }
+:is([role="dialog"],.ev-bol,.ev-product-window,.ev-desp-window,.ev-desp-form-window,.ev-fp-window,.ev-hist-modal,.ev-correcao-modal,.ev-turno-modal) > :is(header,footer) { padding: 8px 14px !important; flex-shrink: 0; }
+:is([role="dialog"],.ev-bol,.ev-product-window,.ev-desp-window,.ev-desp-form-window,.ev-fp-window,.ev-hist-modal,.ev-correcao-modal,.ev-turno-modal) :is(.ev-cli-body,.ev-cli-form-content,.ev-form-content,.ev-xml-content,.ev-ne-content,.ev-fp-body,.ev-fin-controls,.ev-desp-controls,.ev-history-body,.ev-bol-fields) { padding: 8px 12px !important; gap: 8px !important; min-height: 0; }
+:is([role="dialog"],.ev-bol,.ev-product-window,.ev-desp-window,.ev-desp-form-window,.ev-fp-window) :is(.ev-product-actions,.ev-cli-footer,.ev-supplier-footer,.ev-xml-footer,.ev-fin-footer,.ev-desp-footer) { padding: 8px 12px !important; gap: 8px !important; flex-shrink: 0; }
+:is([role="dialog"],.ev-bol,.ev-product-window,.ev-desp-window,.ev-desp-form-window,.ev-fp-window) :is(input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),select) { min-height: 32px !important; height: 34px !important; padding-block: 5px !important; }
+:is([role="dialog"],.ev-bol,.ev-product-window,.ev-desp-window,.ev-desp-form-window,.ev-fp-window) :is(.ev-product-table-wrap,.ev-cli-table,.ev-supplier-table,.ev-fin-table,.ev-desp-table,.ev-fp-table-wrap,.ev-bol-table,.ev-xml-table) { min-height: 0; overflow: auto !important; }
+.ev-backup-compact { display:flex; flex-direction:column; }
+.ev-backup-compact > div { min-height:0; overflow:auto; }
+.ev-bol > main { padding: 10px !important; min-height:0; }
+.ev-bol :is(.ev-bol-cards,.ev-bol-fields) { gap: 8px !important; }
+.ev-bol .ev-bol-cards > div { padding: 8px !important; }

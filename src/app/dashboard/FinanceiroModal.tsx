@@ -50,9 +50,9 @@ export default function FinanceiroModal({ onClose }: { onClose: () => void }) {
   const totais = linhas.reduce((a, x) => ({ dinheiro: a.dinheiro + x.dinheiro, pix: a.pix + x.pix, cartao: a.cartao + x.cartao, diferenca: a.diferenca + x.diferenca }), { dinheiro: 0, pix: 0, cartao: 0, diferenca: 0 });
   const selecionado = linhas.find(x => x.dia === detalhe);
   return <div className="ev-fin-overlay" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
-    <section className="ev-fin-modal" role="dialog" aria-modal="true" aria-label="Financeiro">
-      <header className="ev-fin-head"><div><h2>Financeiro</h2><p>Livro-Caixa mensal • fechamentos de caixa aprovados</p></div><button onClick={onClose} aria-label="Fechar">×</button></header>
-      <div className="ev-fin-tabs"><strong>Livro-Caixa</strong>{["Contas a Pagar", "Contas a Receber", "Despesas", "Fluxo de Caixa"].map(x => <span key={x} title="Disponível nas próximas etapas">{x}</span>)}</div>
+    <section className="ev-fin-modal" role="dialog" aria-modal="true" aria-label="Livro de Caixa">
+      <header className="ev-fin-head"><div><h2>Livro de Caixa</h2><p>Livro-Caixa mensal • fechamentos de caixa aprovados</p></div><button onClick={onClose} aria-label="Fechar">×</button></header>
+
       <div className="ev-fin-controls"><label>Mês de referência <input type="month" value={mes} onChange={e => setMes(e.target.value)} /></label><button onClick={() => window.print()}>Imprimir</button></div>
       <div className="ev-fin-summary"><div><small>Vendas em fechamentos aprovados</small><strong>{brl(totais.dinheiro + totais.pix + totais.cartao)}</strong></div><div><small>Dinheiro</small><strong>{brl(totais.dinheiro)}</strong></div><div><small>PIX + Cartões</small><strong>{brl(totais.pix + totais.cartao)}</strong></div></div>
       <p className="ev-fin-note">Valores de vendas por data de fechamento. PIX e cartões não significam necessariamente valores já liquidados no banco. Despesas pagas e resultado líquido serão integrados na próxima etapa; não são considerados nos totais desta versão.</p>

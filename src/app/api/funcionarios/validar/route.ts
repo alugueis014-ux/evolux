@@ -17,9 +17,11 @@ export async function POST(req:NextRequest){
   const result=Array.isArray(data)?data[0]:null;
   if(!result?.autorizado)return NextResponse.json({error:result?.motivo||'Credenciais inválidas'},{status:401});
   const {data:funcionario,error:erroFuncionario}=await c.admin.from('evolux_funcionarios')
-   .select('id,papel,ativo').eq('empresa_id',empresaId).eq('id',id).maybeSingle();
+   .select('id,papel,ativo,nome').eq('empresa_id',empresaId).eq('id',id).maybeSingle();
   if(erroFuncionario||!funcionario?.ativo||funcionario.papel!==result.perfil)return NextResponse.json({error:'Funcionário não autorizado'},{status:403});
   const token=emitirSessaoFuncionario(empresaId,id,c.user.id);
+  const registro=await c.admin.from('evolux_historico_acessos').insert({empresa_id:empresaId,funcionario_id:id,nome:funcionario.nome,papel:funcionario.papel});
+  if(registro.error)console.error('Falha na auditoria de acesso',registro.error.code);
   const response=NextResponse.json({ok:true,papel:funcionario.papel});
   definirCookieFuncionario(response,token);
   return response;
